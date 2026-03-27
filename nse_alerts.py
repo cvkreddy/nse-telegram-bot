@@ -145,65 +145,71 @@ def supertrend(df, period=2, multiplier=3):
 # ===== MAIN LOGIC =====
 
 def check_symbol(name, token):
-    send_telegram(f"TEST: {name} running")
+    try:
+        global last_signals
 
-    global last_signals
+        df = fetch_data(token)
 
-    df = fetch_data(token)
+        if df is None or len(df) < 20:
+            print(f"No sufficient data for {name}")
+            return
 
-    if df is None or len(df) < 20:
-        print(f"No sufficient data for {name}")
-        return
+        df['ema7'] = EMAIndicator(df['Close'], 7).ema_indicator()
+        df['ema15'] = EMAIndicator(df['Close'], 15).ema_indicator()
 
-    df['ema7'] = EMAIndicator(df['Close'], 7).ema_indicator()
-    df['ema15'] = EMAIndicator(df['Close'], 15).ema_indicator()
+        df['rsi'] = RSIIndicator(df['Close'], 15).rsi()
+        df['rsi_ema'] = EMAIndicator(df['rsi'], 30).ema_indicator()
 
-    df['rsi'] = RSIIndicator(df['Close'], 15).rsi()
-    df['rsi_ema'] = EMAIndicator(df['rsi'], 30).ema_indicator()
+        df['st1'] = supertrend(df, 2, 3)
+        df['st2'] = supertrend(df, 2, 2.5)
 
-    df['st1'] = supertrend(df, 2, 3)
-    df['st2'] = supertrend(df, 2, 2.5)
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
 
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    price = round(last['Close'])
+        price = round(last['Close'])
 
-    # ===== EMA =====
-    if last['ema7'] > last['ema15'] and prev['ema7'] <= prev['ema15']:
-        send_telegram(f"📈 {name} EMA BUY\nPrice: {price}")
+        # ===== EMA =====
+        if last['ema7'] > last['ema15'] and prev['ema7'] <= prev['ema15']:
+            send_telegram(f"📈 {name} EMA BUY\nPrice: {price}")
 
-    if last['ema7'] < last['ema15'] and prev['ema7'] >= prev['ema15']:
-        send_telegram(f"📉 {name} EMA SELL\nPrice: {price}")
+        if last['ema7'] < last['ema15'] and prev['ema7'] >= prev['ema15']:
+            send_telegram(f"📉 {name} EMA SELL\nPrice: {price}")
 
-    # ===== ST =====
-    if last['st1'] and not prev['st1']:
-        send_telegram(f"🔥 {name} ST (2,3) BUY\nPrice: {price}")
+        # ===== ST =====
+        if last['st1'] and not prev['st1']:
+            send_telegram(f"🔥 {name} ST (2,3) BUY\nPrice: {price}")
 
-    if not last['st1'] and prev['st1']:
-        send_telegram(f"🔥 {name} ST (2,3) SELL\nPrice: {price}")
+        if not last['st1'] and prev['st1']:
+            send_telegram(f"🔥 {name} ST (2,3) SELL\nPrice: {price}")
 
-    if last['st2'] and not prev['st2']:
-        send_telegram(f"⚡ {name} ST (2,2.5) BUY\nPrice: {price}")
+        if last['st2'] and not prev['st2']:
+            send_telegram(f"⚡ {name} ST (2,2.5) BUY\nPrice: {price}")
 
-    if not last['st2'] and prev['st2']:
-        send_telegram(f"⚡ {name} ST (2,2.5) SELL\nPrice: {price}")
+        if not last['st2'] and prev['st2']:
+            send_telegram(f"⚡ {name} ST (2,2.5) SELL\nPrice: {price}")
 
-    # ===== RSI =====
-    if last['rsi'] > last['rsi_ema'] and prev['rsi'] <= prev['rsi_ema']:
-        send_telegram(f"📊 {name} RSI BUY\nValue: {round(last['rsi'],2)}")
+        # ===== RSI =====
+        if last['rsi'] > last['rsi_ema'] and prev['rsi'] <= prev['rsi_ema']:
+            send_telegram(f"📊 {name} RSI BUY\nValue: {round(last['rsi'],2)}")
 
-    if last['rsi'] < last['rsi_ema'] and prev['rsi'] >= prev['rsi_ema']:
-        send_telegram(f"📊 {name} RSI SELL\nValue: {round(last['rsi'],2)}")
+        if last['rsi'] < last['rsi_ema'] and prev['rsi'] >= prev['rsi_ema']:
+            send_telegram(f"📊 {name} RSI SELL\nValue: {round(last['rsi'],2)}")
+
+    except Exception as e:
+        print(f"ERROR in {name}:", e)
+        send_telegram(f"❌ {name} Error: {e}")
 
 
 def run():
     try:
         print("RUN FUNCTION CALLED")
-        send_telegram("🚀 RUNNING NOW")
+        #send_telegram("🚀 RUNNING NOW")
+        
 
         now = datetime.now()
 
         for name, token in SYMBOLS.items():
+            print(f"Running check for {name}")
             check_symbol(name, token)
 
         print("Checked:", now)
@@ -218,15 +224,20 @@ def run():
 def run_bot():
     print("🔥 BOT THREAD STARTED")
 
-    run()   # ✅ ADD THIS LINE (important)
+    run()   # initial run
 
     schedule.every(5).minutes.do(run)
 
     while True:
-        print("Checking schedule...")
-        schedule.run_pending()
-        time.sleep(5)
-    
+        try:
+            print("Checking schedule...")
+            schedule.run_pending()
+            time.sleep(5)
+
+        except Exception as e:
+            print("THREAD ERROR:", e)
+            send_telegram(f"❌ Thread Error: {e}")
+            time.sleep(10)
     
 # START THREAD
 if __name__ == "__main__":
