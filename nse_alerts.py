@@ -192,18 +192,20 @@ def check_symbol(name, token):
 
 
 def run():
-    print("RUN FUNCTION CALLED")
-    send_telegram("🚀 RUNNING NOW")
+    try:
+        print("RUN FUNCTION CALLED")
+        send_telegram("🚀 RUNNING NOW")
 
-    now = datetime.now()
+        now = datetime.now()
 
-    #if now.hour < 9 or (now.hour == 15 and now.minute > 30) or now.hour > 15:
-    #    return
+        for name, token in SYMBOLS.items():
+            check_symbol(name, token)
 
-    for name, token in SYMBOLS.items():
-        check_symbol(name, token)
+        print("Checked:", now)
 
-    print("Checked:", now)
+    except Exception as e:
+        print("ERROR IN RUN:", e)
+        send_telegram(f"❌ Bot Error: {e}")
 
 
 
