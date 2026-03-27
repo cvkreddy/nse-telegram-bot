@@ -1,3 +1,4 @@
+# ===== FLASK (RENDER KEEP ALIVE) =====
 from flask import Flask
 from threading import Thread
 
@@ -13,6 +14,7 @@ def run_web():
 Thread(target=run_web).start()
 
 
+# ===== IMPORTS =====
 import requests
 import pandas as pd
 import schedule
@@ -21,38 +23,93 @@ from datetime import datetime
 from ta.trend import EMAIndicator
 from ta.momentum import RSIIndicator
 
-# ================== CONFIG ==================
+from SmartApi import SmartConnect
+import pyotp
+import os
+
+
+# ===== CONFIG =====
 BOT_TOKEN = "8622319954:AAFIAMBQm7jgyZZjAuaYDhnPHKElqvFjzDY"
 CHAT_ID = "1592988014"
 
+API_KEY = os.getenv("7yP0WIv5")
+CLIENT_ID = os.getenv("V61186685")
+PASSWORD = os.getenv("4114")  # your PIN
+TOTP_SECRET = os.getenv("520635")
+
+
 SYMBOLS = {
-    "NIFTY": "%5ENSEI",
-    "BANKNIFTY": "%5ENSEBANK",
-    "SENSEX": "%5EBSESN"
+    "NIFTY": "26000",
+    "BANKNIFTY": "26009",
+    "SENSEX": "26037"
 }
 
 last_signals = {}
+smart = None
 
-# ============================================
 
+# ===== TELEGRAM =====
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
-# ===== DATA FETCH =====
-def fetch_data(symbol):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=5m&range=1d"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    res = requests.get(url, headers=headers)
 
-    data = res.json()
+# ===== SMARTAPI LOGIN =====
+def smart_login():
+    global smart
 
-    closes = data['chart']['result'][0]['indicators']['quote'][0]['close']
+    if smart is not None:
+        return smart
 
-    df = pd.DataFrame({"Close": closes})
+    obj = SmartConnect(api_key=API_KEY)
+    totp = pyotp.TOTP(TOTP_SECRET).now()
+
+    data = obj.generateSession(CLIENT_ID, PASSWORD, totp)
+
+    smart = obj
+    return smart
+
+
+# ===== FETCH DATA =====
+def fetch_data(symbol_token):
+    global smart
+    obj = smart_login()
+
+    try:
+        historic = obj.getCandleData({
+            "exchange": "NSE",
+            "symboltoken": symbol_token,
+            "interval": "FIVE_MINUTE",
+            "fromdate": "2024-01-01 09:15",
+            "todate": "2026-12-31 15:30"
+        })
+
+        data = historic['data']
+
+    except Exception as e:
+        print("Re-login:", e)
+        smart = None
+        obj = smart_login()
+
+        historic = obj.getCandleData({
+            "exchange": "NSE",
+            "symboltoken": symbol_token,
+            "interval": "FIVE_MINUTE",
+            "fromdate": "2024-01-01 09:15",
+            "todate": "2026-12-31 15:30"
+        })
+
+        data = historic['data']
+
+    df = pd.DataFrame(data, columns=[
+        "time","open","high","low","close","volume"
+    ])
+
+    df['Close'] = df['close']
     df = df.dropna()
 
     return df
+
 
 # ===== SUPERTREND =====
 def supertrend(df, period=2, multiplier=3):
@@ -74,21 +131,22 @@ def supertrend(df, period=2, multiplier=3):
 
     return trend
 
+
 # ===== MAIN LOGIC =====
-def check_symbol(name, symbol):
+def check_symbol(name, token):
     global last_signals
 
-    df = fetch_data(symbol)
+    df = fetch_data(token)
 
-    # ===== EMA =====
+    # EMA
     df['ema7'] = EMAIndicator(df['Close'], 7).ema_indicator()
     df['ema15'] = EMAIndicator(df['Close'], 15).ema_indicator()
 
-    # ===== RSI =====
+    # RSI
     df['rsi'] = RSIIndicator(df['Close'], 15).rsi()
     df['rsi_ema'] = EMAIndicator(df['rsi'], 30).ema_indicator()
 
-    # ===== ST =====
+    # Supertrend
     df['st1'] = supertrend(df, 2, 3)
     df['st2'] = supertrend(df, 2, 2.5)
 
@@ -97,54 +155,48 @@ def check_symbol(name, symbol):
 
     price = round(last['Close'])
 
-    # ===== EMA CROSS =====
+    # ===== EMA =====
     if last['ema7'] > last['ema15'] and prev['ema7'] <= prev['ema15']:
-        key = f"{name}_EMA_BUY"
-        if last_signals.get(key) != True:
-            send_telegram(f"📈 {name} EMA BUY\nPrice: {price}")
-            last_signals[key] = True
+        send_telegram(f"📈 {name} EMA BUY\nPrice: {price}")
 
     if last['ema7'] < last['ema15'] and prev['ema7'] >= prev['ema15']:
-        key = f"{name}_EMA_SELL"
-        if last_signals.get(key) != True:
-            send_telegram(f"📉 {name} EMA SELL\nPrice: {price}")
-            last_signals[key] = True
+        send_telegram(f"📉 {name} EMA SELL\nPrice: {price}")
 
-    # ===== SUPERTREND =====
-    if last['st1'] == True and prev['st1'] == False:
+    # ===== ST =====
+    if last['st1'] and not prev['st1']:
         send_telegram(f"🔥 {name} ST (2,3) BUY\nPrice: {price}")
 
-    if last['st1'] == False and prev['st1'] == True:
+    if not last['st1'] and prev['st1']:
         send_telegram(f"🔥 {name} ST (2,3) SELL\nPrice: {price}")
 
-    if last['st2'] == True and prev['st2'] == False:
+    if last['st2'] and not prev['st2']:
         send_telegram(f"⚡ {name} ST (2,2.5) BUY\nPrice: {price}")
 
-    if last['st2'] == False and prev['st2'] == True:
+    if not last['st2'] and prev['st2']:
         send_telegram(f"⚡ {name} ST (2,2.5) SELL\nPrice: {price}")
 
-    # ===== RSI CROSS =====
+    # ===== RSI =====
     if last['rsi'] > last['rsi_ema'] and prev['rsi'] <= prev['rsi_ema']:
         send_telegram(f"📊 {name} RSI BUY\nValue: {round(last['rsi'],2)}")
 
     if last['rsi'] < last['rsi_ema'] and prev['rsi'] >= prev['rsi_ema']:
         send_telegram(f"📊 {name} RSI SELL\nValue: {round(last['rsi'],2)}")
 
-# ===== MAIN LOOP =====
+
+# ===== RUN =====
 def run():
     now = datetime.now()
 
-    # market hours filter
     if now.hour < 9 or now.hour > 15:
         return
 
-    for name, symbol in SYMBOLS.items():
-        check_symbol(name, symbol)
+    for name, token in SYMBOLS.items():
+        check_symbol(name, token)
 
-    print("Checked at:", now)
+    print("Checked:", now)
 
-# ===== START =====
-# ===== START BOT IN THREAD =====
+
+# ===== THREAD =====
 def run_bot():
     run()
     schedule.every(5).minutes.do(run)
@@ -153,5 +205,8 @@ def run_bot():
         schedule.run_pending()
         time.sleep(5)
 
-# Run bot in background
 Thread(target=run_bot).start()
+
+
+
+
