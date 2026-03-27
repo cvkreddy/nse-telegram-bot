@@ -29,8 +29,8 @@ import os
 
 
 # ===== CONFIG =====
-BOT_TOKEN = "8622319954:AAFIAMBQm7jgyZZjAuaYDhnPHKElqvFjzDY"
-CHAT_ID = "1592988014"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
 API_KEY = os.getenv("API_KEY")
 CLIENT_ID = os.getenv("CLIENT_ID")
@@ -44,72 +44,62 @@ SYMBOLS = {
     "SENSEX": "26037"
 }
 
-last_signals = {}
 smart = None
 
 
 # ===== TELEGRAM =====
 def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+    except:
+        pass
 
 
 # ===== SMARTAPI LOGIN =====
-
 def smart_login():
     global smart
 
     if smart is not None:
         return smart
 
-    print("TOTP_SECRET VALUE:", TOTP_SECRET)
-
     obj = SmartConnect(api_key=API_KEY)
     totp = pyotp.TOTP(TOTP_SECRET).now()
-
-    print("Generated TOTP:", totp)
-
-    data = obj.generateSession(CLIENT_ID, PASSWORD, totp)
+    obj.generateSession(CLIENT_ID, PASSWORD, totp)
 
     smart = obj
     return smart
 
-def fetch_data(symbol_token):
-    global smart
-    obj = smart_login()
 
+# ===== FETCH DATA =====
+def fetch_data(symbol_token, interval):
     try:
+        obj = smart_login()
+
         fromdate = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M")
         todate = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-        historic = obj.getCandleData({
+        data = obj.getCandleData({
             "exchange": "NSE",
             "symboltoken": symbol_token,
-            "interval": "FIVE_MINUTE",
+            "interval": interval,
             "fromdate": fromdate,
             "todate": todate
         })
 
-        if historic is None or historic.get("data") is None:
-            print("No data received")
+        if data is None or data.get("data") is None:
             return None
 
-        data = historic['data']
+        df = pd.DataFrame(data['data'], columns=[
+            "time","open","high","low","close","volume"
+        ])
+
+        df['Close'] = df['close']
+        return df.dropna()
 
     except Exception as e:
         print("FETCH ERROR:", e)
-        send_telegram(f"❌ Fetch Error: {e}")
         return None
-
-    df = pd.DataFrame(data, columns=[
-        "time","open","high","low","close","volume"
-    ])
-
-    df['Close'] = df['close']
-    df = df.dropna()
-
-    return df
-
 
 
 # ===== SUPERTREND =====
@@ -133,113 +123,110 @@ def supertrend(df, period=2, multiplier=3):
     return trend
 
 
-# ===== MAIN LOGIC =====
+# ===== ANALYZE =====
+def analyze(df):
+    if df is None or len(df) < 3:
+        return None
 
-def check_symbol(name, token):
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    # EMA
+    ema = "🟢 EMA7>EMA15" if last['ema7'] > last['ema15'] else "🔴 EMA7<EMA15"
+
+    slope = "↑" if last['ema7'] > prev['ema7'] else "↓" if last['ema7'] < prev['ema7'] else "→"
+
+    # Price
+    price = round(last['Close'])
+    dist = round(last['Close'] - last['ema7'], 2)
+    price_txt = f"{price} (+{dist}) ↑" if dist > 0 else f"{price} ({dist}) ↓"
+
+    # ST
+    st = f"{'🟢' if last['st1'] else '🔴'}/{'🟢' if last['st2'] else '🔴'}"
+
+    # RSI
+    r_prev = round(prev['rsi'], 1)
+    r_now = round(last['rsi'], 1)
+    diff = round(r_now - r_prev, 1)
+    rsi_txt = f"{r_prev}→{r_now} (+{diff}) ↑" if diff > 0 else f"{r_prev}→{r_now} ({diff}) ↓"
+
+    return {
+        "ema": f"{ema} {slope}",
+        "price": price_txt,
+        "st": st,
+        "rsi": rsi_txt
+    }
+
+
+# ===== CHECK SYMBOL =====
+def check_symbol(name, token, tf):
     try:
-        global last_signals
-        import time
+        interval = "FIVE_MINUTE" if tf == "5M" else "FIFTEEN_MINUTE"
 
-        start = time.time()
-
-        df = fetch_data(token)
-
-        # ✅ TIMEOUT CHECK
-        if time.time() - start > 10:
-            print(f"{name} fetch timeout")
-            return
+        df = fetch_data(token, interval)
 
         if df is None or len(df) < 20:
-            print(f"No sufficient data for {name}")
             return
 
         df['ema7'] = EMAIndicator(df['Close'], 7).ema_indicator()
         df['ema15'] = EMAIndicator(df['Close'], 15).ema_indicator()
-
         df['rsi'] = RSIIndicator(df['Close'], 15).rsi()
-        df['rsi_ema'] = EMAIndicator(df['rsi'], 30).ema_indicator()
-
         df['st1'] = supertrend(df, 2, 3)
         df['st2'] = supertrend(df, 2, 2.5)
 
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
+        a = analyze(df)
+        if a is None:
+            return
 
-        price = round(last['Close'])
+        msg = f"""
+📊 {name} ({tf})
 
-        # ===== EMA =====
-        if last['ema7'] > last['ema15'] and prev['ema7'] <= prev['ema15']:
-            send_telegram(f"📈 {name} EMA BUY\nPrice: {price}")
+TF   | EMA Trend        | Price vs EMA7     | ST      | RSI
+-----|------------------|-------------------|---------|-------------------------
+{tf}  | {a['ema']:<16} | {a['price']:<17} | {a['st']:<7} | {a['rsi']}
+"""
 
-        if last['ema7'] < last['ema15'] and prev['ema7'] >= prev['ema15']:
-            send_telegram(f"📉 {name} EMA SELL\nPrice: {price}")
-
-        # ===== ST =====
-        if last['st1'] and not prev['st1']:
-            send_telegram(f"🔥 {name} ST (2,3) BUY\nPrice: {price}")
-
-        if not last['st1'] and prev['st1']:
-            send_telegram(f"🔥 {name} ST (2,3) SELL\nPrice: {price}")
-
-        if last['st2'] and not prev['st2']:
-            send_telegram(f"⚡ {name} ST (2,2.5) BUY\nPrice: {price}")
-
-        if not last['st2'] and prev['st2']:
-            send_telegram(f"⚡ {name} ST (2,2.5) SELL\nPrice: {price}")
-
-        # ===== RSI =====
-        if last['rsi'] > last['rsi_ema'] and prev['rsi'] <= prev['rsi_ema']:
-            send_telegram(f"📊 {name} RSI BUY\nValue: {round(last['rsi'],2)}")
-
-        if last['rsi'] < last['rsi_ema'] and prev['rsi'] >= prev['rsi_ema']:
-            send_telegram(f"📊 {name} RSI SELL\nValue: {round(last['rsi'],2)}")
+        send_telegram(msg)
 
     except Exception as e:
-        print(f"ERROR in {name}:", e)
         send_telegram(f"❌ {name} Error: {e}")
 
+
+# ===== RUN =====
 def run():
     try:
-        print("RUN FUNCTION CALLED")
-        #send_telegram("🚀 RUNNING NOW")
-        
-
         now = datetime.now()
 
-        for name, token in SYMBOLS.items():
-            print(f"Running check for {name}")
-            check_symbol(name, token)
+        # 15 MIN (priority)
+        if now.minute % 15 == 0:
+            for name, token in SYMBOLS.items():
+                check_symbol(name, token, "15M")
 
-        print("Checked:", now)
+        # 5 MIN
+        elif now.minute % 5 == 0:
+            for name, token in SYMBOLS.items():
+                check_symbol(name, token, "5M")
 
     except Exception as e:
-        print("ERROR IN RUN:", e)
         send_telegram(f"❌ Bot Error: {e}")
-
 
 
 # ===== THREAD =====
 def run_bot():
     print("🔥 BOT THREAD STARTED")
 
-    run()   # initial run
+    run()
 
     schedule.every(5).minutes.do(run)
 
     while True:
         try:
-            print("Checking schedule...")
             schedule.run_pending()
             time.sleep(5)
-
         except Exception as e:
-            print("THREAD ERROR:", e)
             send_telegram(f"❌ Thread Error: {e}")
             time.sleep(10)
-    
-# START THREAD
+
+
 if __name__ == "__main__":
     Thread(target=run_bot).start()
-
-
-
