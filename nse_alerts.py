@@ -133,8 +133,10 @@ def supertrend(df, period=2, multiplier=3):
 
 
 # ===== MAIN LOGIC =====
-send_telegram(f"TEST: {name} running")
 def check_symbol(name, token):
+    send_telegram(f"TEST: {name} running")   # ✅ correct place
+
+
     global last_signals
 
     df = fetch_data(token)
