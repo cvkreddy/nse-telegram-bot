@@ -144,9 +144,14 @@ def run():
     print("Checked at:", now)
 
 # ===== START =====
-run()
-schedule.every(5).minutes.do(run)
+# ===== START BOT IN THREAD =====
+def run_bot():
+    run()
+    schedule.every(5).minutes.do(run)
 
-while True:
-    schedule.run_pending()
-    time.sleep(1)
+    while True:
+        schedule.run_pending()
+        time.sleep(5)
+
+# Run bot in background
+Thread(target=run_bot).start()
