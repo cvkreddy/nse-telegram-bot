@@ -218,6 +218,8 @@ def run():
 def run_bot():
     print("🔥 BOT THREAD STARTED")
 
+    run()   # ✅ ADD THIS LINE (important)
+
     schedule.every(5).minutes.do(run)
 
     while True:
