@@ -11,7 +11,7 @@ def home():
 def run_web():
     app.run(host='0.0.0.0', port=10000)
 
-Thread(target=run_web).start()
+Thread(target=run_web, daemon=True).start()
 
 
 # ===== IMPORTS =====
@@ -74,7 +74,6 @@ def smart_login():
     smart = obj
     return smart
 
-
 def fetch_data(symbol_token):
     global smart
     obj = smart_login()
@@ -91,26 +90,16 @@ def fetch_data(symbol_token):
             "todate": todate
         })
 
+        if historic is None or historic.get("data") is None:
+            print("No data received")
+            return None
+
         data = historic['data']
 
     except Exception as e:
-        print("Re-login:", e)
-        smart = None
-        obj = smart_login()
-
-        # ✅ USE SAME DYNAMIC DATES AGAIN
-        fromdate = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M")
-        todate = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-        historic = obj.getCandleData({
-            "exchange": "NSE",
-            "symboltoken": symbol_token,
-            "interval": "FIVE_MINUTE",
-            "fromdate": fromdate,
-            "todate": todate
-        })
-
-        data = historic['data']
+        print("FETCH ERROR:", e)
+        send_telegram(f"❌ Fetch Error: {e}")
+        return None
 
     df = pd.DataFrame(data, columns=[
         "time","open","high","low","close","volume"
@@ -120,6 +109,8 @@ def fetch_data(symbol_token):
     df = df.dropna()
 
     return df
+
+
 
 # ===== SUPERTREND =====
 def supertrend(df, period=2, multiplier=3):
@@ -147,8 +138,16 @@ def supertrend(df, period=2, multiplier=3):
 def check_symbol(name, token):
     try:
         global last_signals
+        import time
+
+        start = time.time()
 
         df = fetch_data(token)
+
+        # ✅ TIMEOUT CHECK
+        if time.time() - start > 10:
+            print(f"{name} fetch timeout")
+            return
 
         if df is None or len(df) < 20:
             print(f"No sufficient data for {name}")
@@ -198,7 +197,6 @@ def check_symbol(name, token):
     except Exception as e:
         print(f"ERROR in {name}:", e)
         send_telegram(f"❌ {name} Error: {e}")
-
 
 def run():
     try:
