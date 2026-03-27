@@ -204,7 +204,7 @@ def run():
 
 # ===== THREAD =====
 def run_bot():
-    print("Bot started...")
+    print("🔥 BOT THREAD STARTED")
 
     schedule.every(5).minutes.do(run)
 
@@ -212,9 +212,11 @@ def run_bot():
         print("Checking schedule...")
         schedule.run_pending()
         time.sleep(5)
-
+    
+    
 # START THREAD
-Thread(target=run_bot).start()
+if __name__ == "__main__":
+    Thread(target=run_bot).start()
 
 
 
