@@ -75,18 +75,20 @@ def smart_login():
     return smart
 
 
-# ===== FETCH DATA =====
 def fetch_data(symbol_token):
     global smart
     obj = smart_login()
 
     try:
+        fromdate = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M")
+        todate = datetime.now().strftime("%Y-%m-%d %H:%M")
+
         historic = obj.getCandleData({
             "exchange": "NSE",
             "symboltoken": symbol_token,
             "interval": "FIVE_MINUTE",
-            "fromdate": "2024-01-01 09:15",
-            "todate": "2026-12-31 15:30"
+            "fromdate": fromdate,
+            "todate": todate
         })
 
         data = historic['data']
@@ -96,12 +98,16 @@ def fetch_data(symbol_token):
         smart = None
         obj = smart_login()
 
+        # ✅ USE SAME DYNAMIC DATES AGAIN
+        fromdate = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M")
+        todate = datetime.now().strftime("%Y-%m-%d %H:%M")
+
         historic = obj.getCandleData({
             "exchange": "NSE",
             "symboltoken": symbol_token,
             "interval": "FIVE_MINUTE",
-            "fromdate": "2024-01-01 09:15",
-            "todate": "2026-12-31 15:30"
+            "fromdate": fromdate,
+            "todate": todate
         })
 
         data = historic['data']
@@ -114,7 +120,6 @@ def fetch_data(symbol_token):
     df = df.dropna()
 
     return df
-
 
 # ===== SUPERTREND =====
 def supertrend(df, period=2, multiplier=3):
