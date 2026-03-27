@@ -55,14 +55,19 @@ def send_telegram(msg):
 
 
 # ===== SMARTAPI LOGIN =====
+
 def smart_login():
     global smart
 
     if smart is not None:
         return smart
 
+    print("TOTP_SECRET VALUE:", TOTP_SECRET)
+
     obj = SmartConnect(api_key=API_KEY)
     totp = pyotp.TOTP(TOTP_SECRET).now()
+
+    print("Generated TOTP:", totp)
 
     data = obj.generateSession(CLIENT_ID, PASSWORD, totp)
 
