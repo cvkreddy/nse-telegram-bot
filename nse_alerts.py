@@ -188,8 +188,8 @@ def check_symbol(name, token):
 def run():
     now = datetime.now()
 
-    if now.hour < 9 or now.hour > 15:
-        return
+    #if now.hour < 9 or (now.hour == 15 and now.minute > 30) or now.hour > 15:
+    #return
 
     for name, token in SYMBOLS.items():
         check_symbol(name, token)
