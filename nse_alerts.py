@@ -32,10 +32,10 @@ import os
 BOT_TOKEN = "8622319954:AAFIAMBQm7jgyZZjAuaYDhnPHKElqvFjzDY"
 CHAT_ID = "1592988014"
 
-API_KEY = os.getenv("7yP0WIv5")
-CLIENT_ID = os.getenv("V61186685")
-PASSWORD = os.getenv("4114")  # your PIN
-TOTP_SECRET = os.getenv("4be012bc-2758-48fe-a56f-d80da74e6b22")
+API_KEY = os.getenv("API_KEY")
+CLIENT_ID = os.getenv("CLIENT_ID")
+PASSWORD = os.getenv("PASSWORD")
+TOTP_SECRET = os.getenv("TOTP_SECRET")
 
 
 SYMBOLS = {
