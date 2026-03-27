@@ -186,12 +186,14 @@ def check_symbol(name, token):
         send_telegram(f"📊 {name} RSI SELL\nValue: {round(last['rsi'],2)}")
 
 
-# ===== RUN =====
 def run():
+    print("RUN FUNCTION CALLED")
+    send_telegram("🚀 RUNNING NOW")
+
     now = datetime.now()
 
     #if now.hour < 9 or (now.hour == 15 and now.minute > 30) or now.hour > 15:
-    #return
+    #    return
 
     for name, token in SYMBOLS.items():
         check_symbol(name, token)
