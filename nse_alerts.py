@@ -19,7 +19,7 @@ import requests
 import pandas as pd
 import schedule
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from ta.trend import EMAIndicator
 from ta.momentum import RSIIndicator
 
