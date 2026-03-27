@@ -35,7 +35,7 @@ CHAT_ID = "1592988014"
 API_KEY = os.getenv("7yP0WIv5")
 CLIENT_ID = os.getenv("V61186685")
 PASSWORD = os.getenv("4114")  # your PIN
-TOTP_SECRET = os.getenv("520635")
+TOTP_SECRET = os.getenv("4be012bc-2758-48fe-a56f-d80da74e6b22")
 
 
 SYMBOLS = {
