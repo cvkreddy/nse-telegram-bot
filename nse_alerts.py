@@ -143,29 +143,29 @@ def supertrend(df, period=2, multiplier=3):
 
 
 # ===== MAIN LOGIC =====
-def check_symbol(name, token):
-    send_telegram(f"TEST: {name} running")   # ✅ correct place
 
+def check_symbol(name, token):
+    send_telegram(f"TEST: {name} running")
 
     global last_signals
 
     df = fetch_data(token)
 
-    # EMA
+    if df is None or len(df) < 20:
+        print(f"No sufficient data for {name}")
+        return
+
     df['ema7'] = EMAIndicator(df['Close'], 7).ema_indicator()
     df['ema15'] = EMAIndicator(df['Close'], 15).ema_indicator()
 
-    # RSI
     df['rsi'] = RSIIndicator(df['Close'], 15).rsi()
     df['rsi_ema'] = EMAIndicator(df['rsi'], 30).ema_indicator()
 
-    # Supertrend
     df['st1'] = supertrend(df, 2, 3)
     df['st2'] = supertrend(df, 2, 2.5)
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
-
     price = round(last['Close'])
 
     # ===== EMA =====
