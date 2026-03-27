@@ -201,6 +201,7 @@ def run():
     print("Checked:", now)
 
 
+
 # ===== THREAD =====
 def run_bot():
     print("Bot started...")
@@ -212,6 +213,8 @@ def run_bot():
         schedule.run_pending()
         time.sleep(5)
 
+# START THREAD
+Thread(target=run_bot).start()
 
 
 
