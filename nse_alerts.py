@@ -25,7 +25,6 @@ from ta.momentum import RSIIndicator
 from SmartApi import SmartConnect
 import pyotp
 import os
-import threading
 
 
 # ===== CONFIG =====
@@ -37,30 +36,22 @@ CLIENT_ID = os.getenv("CLIENT_ID")
 PASSWORD = os.getenv("PASSWORD")
 TOTP_SECRET = os.getenv("TOTP_SECRET")
 
+# 👉 USING FUTURES (IMPORTANT)
 SYMBOLS = {
-    "NIFTY": "3045",        # NIFTYBEES
-    "BANKNIFTY": "26009",   # BANKBEES (or correct token)
+    "NIFTY": "NIFTY",
+    "BANKNIFTY": "BANKNIFTY"
 }
+
 smart = None
 
 
 # ===== TELEGRAM =====
 def send_telegram(msg):
     try:
-        print("Sending Telegram:", msg)
-
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
-        response = requests.post(
-            url,
-            data={"chat_id": CHAT_ID, "text": msg},
-            timeout=5
-        )
-
-        print("TELEGRAM RESPONSE:", response.text)
-
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg}, timeout=5)
     except Exception as e:
-        print("TELEGRAM ERROR:", e)
+        print("Telegram error:", e)
 
 
 # ===== SMART LOGIN =====
@@ -78,27 +69,35 @@ def smart_login():
     return smart
 
 
-# ===== EXCHANGE FIX =====
-def get_exchange(name):
-    if name == "SENSEX":
-        return "BSE"
-    else:
-        return "NSE"
+# ===== GET TOKEN (DYNAMIC) =====
+def get_token(symbol_name):
+    try:
+        obj = smart_login()
+
+        res = obj.searchScrip("NFO", symbol_name)
+
+        if res and res.get("data"):
+            for item in res["data"]:
+                if "FUT" in item["tradingsymbol"]:
+                    return item["symboltoken"]
+
+    except Exception as e:
+        print("TOKEN ERROR:", e)
+
+    return None
 
 
 # ===== FETCH DATA =====
-def fetch_data(symbol_token, interval, name):
+def fetch_data(token, interval):
     try:
         obj = smart_login()
 
         fromdate = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M")
         todate = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-        exchange = get_exchange(name)
-
         data = obj.getCandleData({
-            "exchange": exchange,
-            "symboltoken": symbol_token,
+            "exchange": "NFO",
+            "symboltoken": token,
             "interval": interval,
             "fromdate": fromdate,
             "todate": todate
@@ -169,13 +168,19 @@ def analyze(df):
 
 
 # ===== CHECK SYMBOL =====
-def check_symbol(name, token, tf):
+def check_symbol(name, symbol_name, tf):
     try:
         send_telegram(f"⚡ START {name} {tf}")
 
+        token = get_token(symbol_name)
+
+        if token is None:
+            send_telegram(f"❌ Token not found {name}")
+            return
+
         interval = "FIVE_MINUTE" if tf == "5M" else "FIFTEEN_MINUTE"
 
-        df = fetch_data(token, interval, name)
+        df = fetch_data(token, interval)
 
         if df is None or len(df) < 20:
             send_telegram(f"⚠️ No data {name} {tf}")
@@ -205,7 +210,7 @@ TF   | EMA Trend        | Price vs EMA7     | ST      | RSI
         send_telegram(f"❌ {name} Error: {e}")
 
 
-# ===== RUN (RATE LIMIT FIXED) =====
+# ===== RUN =====
 last_run_5m = None
 last_run_15m = None
 
@@ -218,22 +223,22 @@ def run():
 
         print("RUN:", now)
 
-        # ===== 15 MIN FIRST =====
+        # 15M FIRST
         if minute // 15 != (last_run_15m if last_run_15m is not None else -1):
             last_run_15m = minute // 15
 
-            for name, token in SYMBOLS.items():
-                check_symbol(name, token, "15M")
+            for name, symbol_name in SYMBOLS.items():
+                check_symbol(name, symbol_name, "15M")
                 time.sleep(2)
 
-            return   # 🔥 IMPORTANT
+            return
 
-        # ===== 5 MIN =====
+        # 5M
         if minute // 5 != (last_run_5m if last_run_5m is not None else -1):
             last_run_5m = minute // 5
 
-            for name, token in SYMBOLS.items():
-                check_symbol(name, token, "5M")
+            for name, symbol_name in SYMBOLS.items():
+                check_symbol(name, symbol_name, "5M")
                 time.sleep(2)
 
     except Exception as e:
