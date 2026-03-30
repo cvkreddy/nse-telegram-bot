@@ -46,17 +46,18 @@ SYMBOLS = {
 smart = None
 
 
-# ===== TELEGRAM (DEBUG VERSION) =====
+# ===== TELEGRAM =====
 def send_telegram(msg):
     try:
         print("Sending Telegram:", msg)
 
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-        response = requests.post(url, data={
-            "chat_id": CHAT_ID,
-            "text": msg
-        })
+        response = requests.post(
+            url,
+            data={"chat_id": CHAT_ID, "text": msg},
+            timeout=5
+        )
 
         print("TELEGRAM RESPONSE:", response.text)
 
@@ -79,8 +80,16 @@ def smart_login():
     return smart
 
 
+# ===== EXCHANGE FIX =====
+def get_exchange(name):
+    if name == "SENSEX":
+        return "BSE_INDEX"
+    else:
+        return "NSE_INDEX"
+
+
 # ===== FETCH DATA WITH TIMEOUT =====
-def fetch_data(symbol_token, interval):
+def fetch_data(symbol_token, interval, name):
     result = {}
 
     def api_call():
@@ -90,8 +99,10 @@ def fetch_data(symbol_token, interval):
             fromdate = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M")
             todate = datetime.now().strftime("%Y-%m-%d %H:%M")
 
+            exchange = get_exchange(name)
+
             data = obj.getCandleData({
-                "exchange": "NSE",
+                "exchange": exchange,
                 "symboltoken": symbol_token,
                 "interval": interval,
                 "fromdate": fromdate,
@@ -182,7 +193,7 @@ def check_symbol(name, token, tf):
 
         interval = "FIVE_MINUTE" if tf == "5M" else "FIFTEEN_MINUTE"
 
-        df = fetch_data(token, interval)
+        df = fetch_data(token, interval, name)
 
         if df is None or len(df) < 20:
             send_telegram(f"⚠️ No data {name} {tf}")
@@ -212,7 +223,7 @@ TF   | EMA Trend        | Price vs EMA7     | ST      | RSI
         send_telegram(f"❌ {name} Error: {e}")
 
 
-# ===== RUN =====
+# ===== RUN (FIXED TIMING) =====
 last_run_5m = None
 last_run_15m = None
 
@@ -221,31 +232,25 @@ def run():
 
     try:
         now = datetime.now()
-
         print("RUN FUNCTION CALLED:", now)
 
         minute = now.minute
 
-        # ===== 5 MIN LOGIC =====
+        # 5 MIN
         if minute // 5 != (last_run_5m if last_run_5m is not None else -1):
             last_run_5m = minute // 5
-
-            print("Running 5M block")
-
             for name, token in SYMBOLS.items():
                 check_symbol(name, token, "5M")
 
-        # ===== 15 MIN LOGIC =====
+        # 15 MIN
         if minute // 15 != (last_run_15m if last_run_15m is not None else -1):
             last_run_15m = minute // 15
-
-            print("Running 15M block")
-
             for name, token in SYMBOLS.items():
                 check_symbol(name, token, "15M")
 
     except Exception as e:
         send_telegram(f"❌ Bot Error: {e}")
+
 
 # ===== THREAD =====
 def run_bot():
@@ -253,7 +258,7 @@ def run_bot():
 
     run()
 
-    schedule.every(5).minutes.do(run)
+    schedule.every(1).minutes.do(run)
 
     while True:
         try:
