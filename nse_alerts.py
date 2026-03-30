@@ -213,28 +213,39 @@ TF   | EMA Trend        | Price vs EMA7     | ST      | RSI
 
 
 # ===== RUN =====
+last_run_5m = None
+last_run_15m = None
+
 def run():
+    global last_run_5m, last_run_15m
+
     try:
         now = datetime.now()
 
         print("RUN FUNCTION CALLED:", now)
 
-        # 15 MIN
-        if now.minute % 15 == 0:
-            for name, token in SYMBOLS.items():
-                check_symbol(name, token, "15M")
+        minute = now.minute
 
-        # 5 MIN
-        elif now.minute % 5 == 0:
+        # ===== 5 MIN LOGIC =====
+        if minute // 5 != (last_run_5m if last_run_5m is not None else -1):
+            last_run_5m = minute // 5
+
+            print("Running 5M block")
+
             for name, token in SYMBOLS.items():
                 check_symbol(name, token, "5M")
 
-        else:
-            print("Idle...")
+        # ===== 15 MIN LOGIC =====
+        if minute // 15 != (last_run_15m if last_run_15m is not None else -1):
+            last_run_15m = minute // 15
+
+            print("Running 15M block")
+
+            for name, token in SYMBOLS.items():
+                check_symbol(name, token, "15M")
 
     except Exception as e:
         send_telegram(f"❌ Bot Error: {e}")
-
 
 # ===== THREAD =====
 def run_bot():
