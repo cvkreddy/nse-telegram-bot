@@ -88,53 +88,37 @@ def get_exchange(name):
         return "NSE_INDEX"
 
 
-# ===== FETCH DATA WITH TIMEOUT =====
+# ===== FETCH DATA =====
 def fetch_data(symbol_token, interval, name):
-    result = {}
+    try:
+        obj = smart_login()
 
-    def api_call():
-        try:
-            obj = smart_login()
+        fromdate = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M")
+        todate = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-            fromdate = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M")
-            todate = datetime.now().strftime("%Y-%m-%d %H:%M")
+        exchange = get_exchange(name)
 
-            exchange = get_exchange(name)
+        data = obj.getCandleData({
+            "exchange": exchange,
+            "symboltoken": symbol_token,
+            "interval": interval,
+            "fromdate": fromdate,
+            "todate": todate
+        })
 
-            data = obj.getCandleData({
-                "exchange": exchange,
-                "symboltoken": symbol_token,
-                "interval": interval,
-                "fromdate": fromdate,
-                "todate": todate
-            })
+        if data is None or data.get("data") is None:
+            return None
 
-            result['data'] = data
+        df = pd.DataFrame(data['data'], columns=[
+            "time","open","high","low","close","volume"
+        ])
 
-        except Exception as e:
-            result['error'] = str(e)
+        df['Close'] = df['close']
+        return df.dropna()
 
-    t = threading.Thread(target=api_call)
-    t.start()
-    t.join(timeout=8)
-
-    if t.is_alive():
-        print("API TIMEOUT")
+    except Exception as e:
+        print("API ERROR:", e)
         return None
-
-    if 'error' in result:
-        print("API ERROR:", result['error'])
-        return None
-
-    if result.get('data') is None or result['data'].get('data') is None:
-        return None
-
-    df = pd.DataFrame(result['data']['data'], columns=[
-        "time","open","high","low","close","volume"
-    ])
-
-    df['Close'] = df['close']
-    return df.dropna()
 
 
 # ===== SUPERTREND =====
@@ -223,7 +207,7 @@ TF   | EMA Trend        | Price vs EMA7     | ST      | RSI
         send_telegram(f"❌ {name} Error: {e}")
 
 
-# ===== RUN (FIXED TIMING) =====
+# ===== RUN (RATE LIMIT FIXED) =====
 last_run_5m = None
 last_run_15m = None
 
@@ -232,21 +216,27 @@ def run():
 
     try:
         now = datetime.now()
-        print("RUN FUNCTION CALLED:", now)
-
         minute = now.minute
 
-        # 5 MIN
-        if minute // 5 != (last_run_5m if last_run_5m is not None else -1):
-            last_run_5m = minute // 5
-            for name, token in SYMBOLS.items():
-                check_symbol(name, token, "5M")
+        print("RUN:", now)
 
-        # 15 MIN
+        # ===== 15 MIN FIRST =====
         if minute // 15 != (last_run_15m if last_run_15m is not None else -1):
             last_run_15m = minute // 15
+
             for name, token in SYMBOLS.items():
                 check_symbol(name, token, "15M")
+                time.sleep(2)
+
+            return   # 🔥 IMPORTANT
+
+        # ===== 5 MIN =====
+        if minute // 5 != (last_run_5m if last_run_5m is not None else -1):
+            last_run_5m = minute // 5
+
+            for name, token in SYMBOLS.items():
+                check_symbol(name, token, "5M")
+                time.sleep(2)
 
     except Exception as e:
         send_telegram(f"❌ Bot Error: {e}")
