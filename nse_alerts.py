@@ -533,19 +533,29 @@ def run():
         send_telegram(f"❌ Bot Error: {e}")
 
 
+  
+
 def run_bot():
-    print("BOT THREAD STARTED")
+    print("🔥 BOT THREAD STARTED")
 
-    # Stagger the first runs slightly
+    # ✅ FORCE FIRST RUN
     run()
-    time.sleep(10)
-    run_oi_check()
 
-    # Every 5 minutes — EMA/RSI/ST checks
     schedule.every(5).minutes.do(run)
 
-    # Every 5 minutes — OI change detection (only alerts on meaningful change)
-    schedule.every(5).minutes.do(run_oi_check)
+    while True:
+        try:
+            print("Checking schedule...")
+            schedule.run_pending()
+            time.sleep(1)   # ⬅️ reduce delay (important)
+            run_oi_check()
+
+
+        except Exception as e:
+            print("THREAD ERROR:", e)
+            send_telegram(f"❌ Thread Error: {e}")
+            time.sleep(5)
+            schedule.every(5).minutes.do(run_oi_check)
 
     # Full OI summary at open and midday
     schedule.every().day.at("09:00").do(send_oi_summary)
