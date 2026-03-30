@@ -46,13 +46,22 @@ SYMBOLS = {
 smart = None
 
 
-# ===== TELEGRAM =====
+# ===== TELEGRAM (DEBUG VERSION) =====
 def send_telegram(msg):
     try:
+        print("Sending Telegram:", msg)
+
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+
+        response = requests.post(url, data={
+            "chat_id": CHAT_ID,
+            "text": msg
+        })
+
+        print("TELEGRAM RESPONSE:", response.text)
+
     except Exception as e:
-        print("Telegram error:", e)
+        print("TELEGRAM ERROR:", e)
 
 
 # ===== SMART LOGIN =====
@@ -169,7 +178,7 @@ def analyze(df):
 # ===== CHECK SYMBOL =====
 def check_symbol(name, token, tf):
     try:
-        send_telegram(f"⚡ START {name} {tf}")   # DEBUG
+        send_telegram(f"⚡ START {name} {tf}")
 
         interval = "FIVE_MINUTE" if tf == "5M" else "FIFTEEN_MINUTE"
 
@@ -207,6 +216,8 @@ TF   | EMA Trend        | Price vs EMA7     | ST      | RSI
 def run():
     try:
         now = datetime.now()
+
+        send_telegram("🚀 TEST MESSAGE")   # 🔥 MUST COME
 
         print("RUN FUNCTION CALLED:", now)
 
