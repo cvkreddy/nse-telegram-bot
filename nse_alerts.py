@@ -38,11 +38,9 @@ PASSWORD = os.getenv("PASSWORD")
 TOTP_SECRET = os.getenv("TOTP_SECRET")
 
 SYMBOLS = {
-    "NIFTY": "26000",
-    "BANKNIFTY": "26009",
-    "SENSEX": "26037"
+    "NIFTY": "3045",        # NIFTYBEES
+    "BANKNIFTY": "26009",   # BANKBEES (or correct token)
 }
-
 smart = None
 
 
@@ -83,9 +81,9 @@ def smart_login():
 # ===== EXCHANGE FIX =====
 def get_exchange(name):
     if name == "SENSEX":
-        return "BSE_INDEX"
+        return "BSE"
     else:
-        return "NSE_INDEX"
+        return "NSE"
 
 
 # ===== FETCH DATA =====
