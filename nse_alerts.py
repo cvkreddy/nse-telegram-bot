@@ -566,17 +566,28 @@ def send_premarket_summary():
 
 # ===== RUN (EMA / ST / RSI checks) =====
 def run():
-    if not is_market_open():
-        print(f"[RUN] Market closed at {ist_str()} IST — skipping")
-        return
     try:
         now = ist_now()
+
+        # ✅ TEMPORARY: REMOVE MARKET CHECK
+        # if not is_market_open():
+        #     print(f"[RUN] Market closed at {ist_str()} IST — skipping")
+        #     return
+
+        print(f"[RUN] Executing at {ist_str()}")
+
         if now.minute % 15 == 0:
             for name, token in SYMBOLS.items():
                 check_symbol(name, token, "15M")
+
         elif now.minute % 5 == 0:
             for name, token in SYMBOLS.items():
                 check_symbol(name, token, "5M")
+
+        # ✅ FORCE TEST MESSAGE
+        else:
+            send_telegram(f"⏱ TEST RUN at {ist_str()}")
+
     except Exception as e:
         send_telegram(f"❌ Bot Error: {e}")
 
