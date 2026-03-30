@@ -219,23 +219,18 @@ def run():
 
         print("RUN FUNCTION CALLED:", now)
 
-        sent = False
-
         # 15 MIN
         if now.minute % 15 == 0:
             for name, token in SYMBOLS.items():
                 check_symbol(name, token, "15M")
-            sent = True
 
         # 5 MIN
         elif now.minute % 5 == 0:
             for name, token in SYMBOLS.items():
                 check_symbol(name, token, "5M")
-            sent = True
 
-        # ✅ ALWAYS CONFIRM BOT ALIVE
-        if not sent:
-            send_telegram(f"⏱ Alive {now.strftime('%H:%M')}")
+        else:
+            print("Idle...")
 
     except Exception as e:
         send_telegram(f"❌ Bot Error: {e}")
