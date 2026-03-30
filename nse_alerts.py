@@ -36,10 +36,10 @@ CLIENT_ID = os.getenv("CLIENT_ID")
 PASSWORD = os.getenv("PASSWORD")
 TOTP_SECRET = os.getenv("TOTP_SECRET")
 
-# 👉 USING FUTURES (IMPORTANT)
+# 🔥 FIXED TOKENS (NO searchScrip)
 SYMBOLS = {
-    "NIFTY": "NIFTY",
-    "BANKNIFTY": "BANKNIFTY"
+    "NIFTY": "99926000",
+    "BANKNIFTY": "99926009"
 }
 
 smart = None
@@ -67,24 +67,6 @@ def smart_login():
 
     smart = obj
     return smart
-
-
-# ===== GET TOKEN (DYNAMIC) =====
-def get_token(symbol_name):
-    try:
-        obj = smart_login()
-
-        res = obj.searchScrip("NFO", symbol_name)
-
-        if res and res.get("data"):
-            for item in res["data"]:
-                if "FUT" in item["tradingsymbol"]:
-                    return item["symboltoken"]
-
-    except Exception as e:
-        print("TOKEN ERROR:", e)
-
-    return None
 
 
 # ===== FETCH DATA =====
@@ -168,15 +150,9 @@ def analyze(df):
 
 
 # ===== CHECK SYMBOL =====
-def check_symbol(name, symbol_name, tf):
+def check_symbol(name, token, tf):
     try:
         send_telegram(f"⚡ START {name} {tf}")
-
-        token = get_token(symbol_name)
-
-        if token is None:
-            send_telegram(f"❌ Token not found {name}")
-            return
 
         interval = "FIVE_MINUTE" if tf == "5M" else "FIFTEEN_MINUTE"
 
@@ -223,22 +199,22 @@ def run():
 
         print("RUN:", now)
 
-        # 15M FIRST
+        # ===== 15M FIRST =====
         if minute // 15 != (last_run_15m if last_run_15m is not None else -1):
             last_run_15m = minute // 15
 
-            for name, symbol_name in SYMBOLS.items():
-                check_symbol(name, symbol_name, "15M")
+            for name, token in SYMBOLS.items():
+                check_symbol(name, token, "15M")
                 time.sleep(2)
 
             return
 
-        # 5M
+        # ===== 5M =====
         if minute // 5 != (last_run_5m if last_run_5m is not None else -1):
             last_run_5m = minute // 5
 
-            for name, symbol_name in SYMBOLS.items():
-                check_symbol(name, symbol_name, "5M")
+            for name, token in SYMBOLS.items():
+                check_symbol(name, token, "5M")
                 time.sleep(2)
 
     except Exception as e:
