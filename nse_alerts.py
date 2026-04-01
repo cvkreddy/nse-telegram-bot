@@ -207,11 +207,11 @@ def check_symbol(name, token, tf):
             print(f"[CHECK] {name} {tf} — insufficient data ({len(df) if df is not None else 0} rows)")
             return
 
-        df['ema7']  = EMAIndicator(df['Close'], 7).ema_indicator()
-        df['ema15'] = EMAIndicator(df['Close'], 15).ema_indicator()
+        df['ema7']  = EMAIndicator(df['Close'], 10).ema_indicator()
+        df['ema15'] = EMAIndicator(df['Close'], 30).ema_indicator()
         df['rsi']   = RSIIndicator(df['Close'], 15).rsi()
-        df['st1']   = supertrend(df, 2, 3)
-        df['st2']   = supertrend(df, 2, 2.5)
+        df['st1']   = supertrend(df, 10, 3)
+        df['st2']   = supertrend(df, 3, 1.5)
 
         a = analyze(df)
         if a is None:
