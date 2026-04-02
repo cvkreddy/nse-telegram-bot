@@ -141,92 +141,79 @@ def fetch_data(token, interval):
         return None
 
 
-# ======================================
-# ===== NSE OPTIONS CHAIN / OI =========
-# ======================================
+# ======================================================
+# ===== OI via Angel One getOptionGreeks (no NSE) ======
+# ======================================================
+# NSE direct API is blocked on server IPs (Render/AWS etc.)
+# Angel One's getOptionGreeks API uses your authenticated
+# session — no IP restriction, reliable live data.
 
-NSE_HEADERS = {
-    "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/122.0.0.0 Safari/537.36",
-    "Accept":          "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer":         "https://www.nseindia.com/",
-    "Connection":      "keep-alive",
-}
+from collections import Counter
+import math
 
 
-def _make_nse_session():
+def nearest_expiry_str(index_name):
     """
-    NSE requires a properly warmed-up session with valid cookies.
-    Visit 2 pages (homepage + options page) before hitting the API.
-    Render server IPs get empty data if session isn't warmed up correctly.
+    Calculate the nearest weekly expiry date string
+    in Angel One format: e.g. '03Apr2025'
+    NIFTY    → Thursday (weekday 3)
+    BANKNIFTY → Wednesday (weekday 2)
     """
-    s = requests.Session()
+    from datetime import date, timedelta
+    target = {"NIFTY": 3, "BANKNIFTY": 2}.get(index_name, 3)
+    today  = date.today()
+    days   = (target - today.weekday()) % 7
+    expiry = today + timedelta(days=days)
+    return expiry.strftime("%d%b%Y").capitalize()   # e.g. "03Apr2025"
+
+
+def fetch_option_greeks(obj, index_name, expiry_str):
+    """
+    Call Angel One getOptionGreeks for a given index + expiry.
+    Returns list of dicts (one per strike/type) or None on failure.
+    """
     try:
-        s.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=15)
-        time.sleep(1.2)
-        s.get("https://www.nseindia.com/option-chain", headers=NSE_HEADERS, timeout=15)
-        time.sleep(1.2)
+        params = {"name": index_name, "expirydate": expiry_str}
+        print(f"[OI] getOptionGreeks {index_name} expiry={expiry_str}")
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(obj.getOptionGreeks, params)
+            resp   = future.result(timeout=25)
+        if resp and resp.get("status") and resp.get("data"):
+            print(f"[OI] Got {len(resp['data'])} rows for {index_name}")
+            return resp["data"]
+        print(f"[OI] Empty response: {resp.get('message','?') if resp else 'None'}")
+        return None
+    except FuturesTimeout:
+        print(f"[OI] getOptionGreeks timeout for {index_name}")
+        return None
     except Exception as e:
-        print(f"[NSE SESSION WARMUP] {e}")
-    return s
+        print(f"[OI] getOptionGreeks error {index_name}: {e}")
+        return None
 
 
-def fetch_nse_options(symbol):
-    """
-    Fetch NSE options chain with warmed-up session.
-    Retries up to 3 times with fresh session each time.
-    """
-    url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-    for attempt in range(3):
-        try:
-            s   = _make_nse_session()
-            r   = s.get(url, headers=NSE_HEADERS, timeout=20)
-            print(f"[NSE] {symbol} HTTP {r.status_code} attempt {attempt+1} len={len(r.content)}")
-            if r.status_code != 200:
-                time.sleep(4)
-                continue
-            data = r.json()
-            # Validate: underlyingValue must be non-zero and data must have rows
-            uv   = float(data.get("records", {}).get("underlyingValue", 0))
-            rows = data.get("records", {}).get("data", [])
-            if uv > 0 and len(rows) > 0:
-                print(f"[NSE] {symbol} OK — spot={uv} rows={len(rows)}")
-                return data
-            print(f"[NSE] {symbol} Empty/zero data (uv={uv} rows={len(rows)}) attempt {attempt+1}")
-            time.sleep(4)
-        except Exception as e:
-            print(f"[NSE ERROR] {symbol} attempt {attempt+1}: {e}")
-            time.sleep(4)
-    return None
-
-
-def fetch_india_vix():
-    """Fetch India VIX value from NSE allIndices."""
+def fetch_india_vix_angel(obj):
+    """Fetch India VIX using Angel One LTP endpoint (token 26017 = INDIA VIX)."""
     try:
-        s = requests.Session()
-        s.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=12)
-        time.sleep(0.5)
-        r = s.get("https://www.nseindia.com/api/allIndices",
-                  headers=NSE_HEADERS, timeout=12)
-        if r.status_code == 200:
-            for item in r.json().get("data", []):
-                if item.get("index") == "INDIA VIX":
-                    return round(float(item["last"]), 2)
+        params = {"mode": "LTP", "exchangeTokens": {"NSE": ["26017"]}}
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(obj.getMarketData, "LTP", "NSE", "26017")
+            resp   = future.result(timeout=10)
+        if resp and resp.get("status"):
+            fetched = resp.get("data", {}).get("fetched", [])
+            if fetched:
+                return round(float(fetched[0].get("ltp", 0)), 2)
     except Exception as e:
-        print(f"[VIX ERROR] {e}")
+        print(f"[VIX] {e}")
     return None
 
 
 def calc_max_pain(chain_map):
-    """
-    Max Pain = strike where total OI writer loss is minimum.
-    chain_map: dict of strike -> {ce_oi, pe_oi}
-    """
+    """Max Pain = strike where total OI writer loss is minimum."""
     try:
         strikes = sorted(chain_map.keys())
-        pain    = {}
+        if not strikes:
+            return None
+        pain = {}
         for K in strikes:
             loss = 0
             for S in strikes:
@@ -235,263 +222,237 @@ def calc_max_pain(chain_map):
             pain[K] = loss
         return min(pain, key=pain.get)
     except Exception as e:
-        print(f"[MAXPAIN ERROR] {e}")
+        print(f"[MAXPAIN] {e}")
         return None
 
 
-def oi_signal(oi_chg, pchg, side):
-    """
-    Classify participant activity from OI change.
-    CE above ATM: OI adding = sellers (shorts) building resistance
-    PE below ATM: OI adding = buyers/writers building support
-    Returns (emoji, label)
-    """
+def oi_signal(pchg, side):
+    """Classify OI activity from % change."""
     if side == "CE":
-        if   pchg >  40:  return "🔴🔴", "HEAVY SHORT ⚠"
-        elif pchg >  15:  return "🔴",   "Shorts Adding"
-        elif pchg >   3:  return "🔺",   "Adding"
-        elif pchg < -15:  return "🟢",   "Short Covering"
-        elif pchg <  -3:  return "🟡",   "Exiting"
-        else:             return "⚪",   "Stable"
-    else:  # PE
-        if   pchg >  40:  return "🟢🟢", "STRONG SUPPORT ⚠"
-        elif pchg >  15:  return "🟢",   "Support Adding"
-        elif pchg >   3:  return "🔺",   "Adding"
-        elif pchg < -15:  return "🔴",   "Support Falling"
-        elif pchg <  -3:  return "🟡",   "Unwinding"
-        else:             return "⚪",   "Stable"
+        if   pchg >  40: return "🔴🔴", "HEAVY SHORT ⚠"
+        elif pchg >  15: return "🔴",   "Shorts Adding"
+        elif pchg >   3: return "🔺",   "Adding"
+        elif pchg < -15: return "🟢",   "Short Covering"
+        elif pchg <  -3: return "🟡",   "Exiting"
+        else:            return "⚪",   "Stable"
+    else:
+        if   pchg >  40: return "🟢🟢", "STRONG SUPP ⚠"
+        elif pchg >  15: return "🟢",   "Support Adding"
+        elif pchg >   3: return "🔺",   "Adding"
+        elif pchg < -15: return "🔴",   "Support Falling"
+        elif pchg <  -3: return "🟡",   "Unwinding"
+        else:            return "⚪",   "Stable"
 
 
 def pcr_verdict(pcr):
-    if pcr >= 1.5:  return "🟢🟢 Heavily Oversold — reversal likely"
+    if pcr >= 1.5:  return "🟢🟢 Heavily Oversold"
     if pcr >= 1.2:  return "🟢 Bullish tilt"
     if pcr >= 0.95: return "⚪ Neutral"
     if pcr >= 0.75: return "🔴 Bearish tilt"
-    return "🔴🔴 Heavily Overbought — fall risk"
+    return "🔴🔴 Heavily Overbought"
 
 
 def analyze_oi(index_name):
     """
-    Full OI analysis: ATM±5 strikes, CE/PE walls, PCR, MaxPain, VIX.
-    Returns formatted Telegram HTML string.
+    Full OI analysis using Angel One getOptionGreeks.
+    ATM±5 strikes, CE/PE walls, PCR, MaxPain.
     """
-    print(f"[OI] Analyzing {index_name}")
-    raw = fetch_nse_options(index_name)
-    if raw is None:
-        return f"⚠️ {index_name} OI: NSE fetch failed"
+    obj = smart_login()
+    if obj is None:
+        return f"⚠️ {index_name} OI: login failed"
+
+    step       = STRIKE_STEP[index_name]
+    expiry_str = nearest_expiry_str(index_name)
+    rows       = fetch_option_greeks(obj, index_name, expiry_str)
+
+    # If nearest expiry fails, try next week's expiry
+    if not rows:
+        from datetime import date, timedelta
+        target  = {"NIFTY": 3, "BANKNIFTY": 2}.get(index_name, 3)
+        today   = date.today()
+        days    = (target - today.weekday()) % 7 + 7
+        expiry2 = (today + timedelta(days=days)).strftime("%d%b%Y").capitalize()
+        print(f"[OI] Retrying with next expiry {expiry2}")
+        rows    = fetch_option_greeks(obj, index_name, expiry2)
+        if rows:
+            expiry_str = expiry2
+
+    if not rows:
+        return f"⚠️ {index_name} OI: no data from Angel One (expiry={expiry_str})"
 
     try:
-        records  = raw.get("records", {})
-        filtered = raw.get("filtered", {})
-        step     = STRIKE_STEP[index_name]
+        # Build chain_map: strike -> {ce_oi, ce_chg, ce_pchg, ce_iv, pe_oi, ...}
+        chain_map = {}
+        spot      = 0.0
 
-        # --- Spot price: try records first, then dig into data rows ---
-        spot = float(records.get("underlyingValue", 0))
+        for r in rows:
+            s     = int(float(r.get("strikeprice", 0)))
+            otype = str(r.get("optiontype", "")).upper()
+            uv    = float(r.get("underlyingValue", 0) or 0)
+            if uv > 0:
+                spot = uv
+
+            if s not in chain_map:
+                chain_map[s] = {
+                    "ce_oi": 0, "ce_chg": 0, "ce_pchg": 0.0,
+                    "ce_iv": 0.0, "ce_ltp": 0.0,
+                    "pe_oi": 0, "pe_chg": 0, "pe_pchg": 0.0,
+                    "pe_iv": 0.0, "pe_ltp": 0.0,
+                }
+
+            oi    = int(float(r.get("openInterest",         0) or 0))
+            chg   = int(float(r.get("changeinOpenInterest", 0) or 0))
+            pchg  = float(r.get("percentChangeinOpenInterest", 0) or 0)
+            iv    = float(r.get("impliedVolatility",        0) or 0)
+            ltp   = float(r.get("lastPrice",                0) or 0)
+
+            if otype == "CE":
+                chain_map[s].update(ce_oi=oi, ce_chg=chg,
+                                    ce_pchg=pchg, ce_iv=iv, ce_ltp=ltp)
+            elif otype == "PE":
+                chain_map[s].update(pe_oi=oi, pe_chg=chg,
+                                    pe_pchg=pchg, pe_iv=iv, pe_ltp=ltp)
+
         if spot == 0:
-            # Fallback: pull underlyingValue from first CE or PE row that has it
-            for row in records.get("data", []):
-                for side in ("CE", "PE"):
-                    uv = float((row.get(side) or {}).get("underlyingValue", 0))
-                    if uv > 0:
-                        spot = uv
-                        break
-                if spot > 0:
-                    break
-        if spot == 0:
-            return f"⚠️ {index_name} OI: spot price is 0 — NSE may be blocking. Try later."
+            # Fallback: estimate spot from ATM CE+PE midpoint
+            if chain_map:
+                mid = sorted(chain_map.keys())[len(chain_map)//2]
+                spot = float(mid)
 
-        atm    = round(spot / step) * step
-        expiry = records.get("expiryDates", ["?"])[0]
+        atm = round(spot / step) * step
 
-        # Strikes to show: CE = ATM+1 to ATM+5 (above), PE = ATM to ATM-5
+        # ATM ± 5 strikes
         ce_strikes = [atm + i * step for i in range(1, 6)]
         pe_strikes = [atm - i * step for i in range(0, 6)]
-        all_watch  = set(ce_strikes + pe_strikes)
 
-        # Parse options chain into lookup dict
-        # NSE expiryDate in data rows may differ from records.expiryDates list
-        # Detect actual nearest expiry from data rows (most common = weekly)
-        from collections import Counter
-        all_rows = records.get("data", [])
-        expiry_counts = Counter(
-            r.get("expiryDate", "") for r in all_rows if r.get("expiryDate")
+        # Totals for PCR
+        tot_ce = sum(v["ce_oi"] for v in chain_map.values())
+        tot_pe = sum(v["pe_oi"] for v in chain_map.values())
+        pcr    = round(tot_pe / tot_ce, 2) if tot_ce > 0 else 0.0
+
+        # MaxPain
+        max_pain     = calc_max_pain(chain_map)
+        pain_diff    = round(spot - max_pain) if max_pain else 0
+        pain_str     = f"{max_pain:,}" if max_pain else "N/A"
+        pain_dir     = (
+            f"Spot {abs(pain_diff)}pts {'BELOW ↓' if pain_diff < 0 else 'ABOVE ↑'} MaxPain"
+            if max_pain else ""
         )
-        if expiry_counts:
-            expiry = expiry_counts.most_common(1)[0][0]
 
-        chain_map = {}
-        for row in all_rows:
-            if row.get("expiryDate") != expiry:
-                continue
-            s  = int(row.get("strikePrice", 0))
-            ce = row.get("CE", {}) or {}
-            pe = row.get("PE", {}) or {}
-            chain_map[s] = {
-                "ce_oi":   int(ce.get("openInterest",             0)),
-                "ce_chg":  int(ce.get("changeinOpenInterest",     0)),
-                "ce_pchg": float(ce.get("pchangeinOpenInterest",  0)),
-                "ce_iv":   float(ce.get("impliedVolatility",      0)),
-                "ce_ltp":  float(ce.get("lastPrice",              0)),
-                "pe_oi":   int(pe.get("openInterest",             0)),
-                "pe_chg":  int(pe.get("changeinOpenInterest",     0)),
-                "pe_pchg": float(pe.get("pchangeinOpenInterest",  0)),
-                "pe_iv":   float(pe.get("impliedVolatility",      0)),
-                "pe_ltp":  float(pe.get("lastPrice",              0)),
-            }
-        print(f"[OI] {index_name} expiry={expiry} strikes_loaded={len(chain_map)}")
+        # VIX (best-effort)
+        vix     = fetch_india_vix_angel(obj)
+        vix_s   = str(vix) if vix else "N/A"
+        vix_tag = " 🔥HIGH" if vix and vix > 20 else " ✅OK" if vix else ""
 
-        # Totals and derived metrics
-        tot_ce = int(filtered.get("CE", {}).get("totOI", 0))
-        tot_pe = int(filtered.get("PE", {}).get("totOI", 0))
-        pcr    = round(tot_pe / tot_ce, 2) if tot_ce > 0 else 0
+        # CE wall (highest OI among ATM+1..ATM+5)
+        ce_oi_map = {s: chain_map.get(s, {}).get("ce_oi", 0) for s in ce_strikes}
+        ce_wall   = max(ce_oi_map, key=ce_oi_map.get)
 
-        max_pain  = calc_max_pain(chain_map)
-        # Fallback: if chain_map was empty (expiry filter too strict), retry without filter
-        if max_pain is None and chain_map:
-            max_pain = max(chain_map, key=lambda s: chain_map[s]["ce_oi"] + chain_map[s]["pe_oi"])
-        pain_diff = round(spot - max_pain) if max_pain is not None else 0
-        pain_tag  = (
-            f"Spot {abs(pain_diff)}pts "
-            f"{'BELOW ↓' if pain_diff < 0 else 'ABOVE ↑'} MaxPain"
-            if max_pain is not None else "MaxPain: N/A"
-        )
-        max_pain_str = f"{max_pain:,}" if max_pain is not None else "N/A"
+        pe_oi_map = {s: chain_map.get(s, {}).get("pe_oi", 0)
+                     for s in pe_strikes if s != atm}
+        pe_wall   = max(pe_oi_map, key=pe_oi_map.get) if pe_oi_map else atm
 
-        vix     = fetch_india_vix()
-        vix_str = str(vix) if vix else "N/A"
-        vix_tag = (" 🔥HIGH" if vix and vix > 20
-                   else " ✅LOW" if vix and vix < 14 else "")
-
-        # ── CE table: highest strike first (descending) ──
-        ce_oi_vals = {s: chain_map.get(s, {}).get("ce_oi", 0) for s in ce_strikes}
-        ce_wall    = max(ce_oi_vals, key=ce_oi_vals.get)
-
+        # ── CE table ──
+        sep     = "─" * 48
         ce_rows = []
         for s in sorted(ce_strikes, reverse=True):
             d     = chain_map.get(s, {})
             oi_l  = round(d.get("ce_oi",   0) / 100_000, 1)
             chg_l = round(d.get("ce_chg",  0) / 100_000, 1)
-            pchg  = d.get("ce_pchg", 0)
-            iv    = d.get("ce_iv",   0)
-            emoji, label = oi_signal(d.get("ce_chg", 0), pchg, "CE")
-            wall_tag = " 🧱" if s == ce_wall else ""
+            pchg  = d.get("ce_pchg", 0.0)
+            iv    = d.get("ce_iv",   0.0)
+            em, lb = oi_signal(pchg, "CE")
+            wall  = " 🧱" if s == ce_wall else ""
             ce_rows.append(
                 f"{s:>7,}  {oi_l:>5.1f}L  "
-                f"{('%+.1f' % chg_l) + 'L':>8}  "
-                f"IV{iv:>5.1f}  {emoji} {label}{wall_tag}"
+                f"{('%+.1f' % chg_l)+'L':>7}  "
+                f"IV{iv:>5.1f}  {em} {lb}{wall}"
             )
 
-        # ATM row shown at bottom of CE block
-        atm_d      = chain_map.get(atm, {})
-        atm_ce_oi  = round(atm_d.get("ce_oi",   0) / 100_000, 1)
-        atm_ce_chg = round(atm_d.get("ce_chg",  0) / 100_000, 1)
-        atm_pchg   = atm_d.get("ce_pchg", 0)
-        atm_iv     = atm_d.get("ce_iv", 0)
-        atm_e, atm_l = oi_signal(atm_d.get("ce_chg", 0), atm_pchg, "CE")
-        atm_ce_row   = (
-            f"{'★'+str(atm):>7}  {atm_ce_oi:>5.1f}L  "
-            f"{('%+.1f' % atm_ce_chg) + 'L':>8}  "
-            f"IV{atm_iv:>5.1f}  {atm_e} {atm_l}  ←ATM"
+        # ATM boundary row (CE side)
+        d0       = chain_map.get(atm, {})
+        atm_oi   = round(d0.get("ce_oi",  0) / 100_000, 1)
+        atm_chg  = round(d0.get("ce_chg", 0) / 100_000, 1)
+        atm_iv   = d0.get("ce_iv", 0.0)
+        atm_em, atm_lb = oi_signal(d0.get("ce_pchg", 0), "CE")
+        atm_row  = (
+            f"{'★'+str(atm):>7}  {atm_oi:>5.1f}L  "
+            f"{('%+.1f' % atm_chg)+'L':>7}  "
+            f"IV{atm_iv:>5.1f}  {atm_em} {atm_lb}  ←ATM"
         )
 
-        # ── PE table: highest (ATM) first, then lower ──
-        pe_oi_vals  = {s: chain_map.get(s, {}).get("pe_oi", 0)
-                       for s in pe_strikes if s != atm}
-        pe_wall     = max(pe_oi_vals, key=pe_oi_vals.get) if pe_oi_vals else atm
-
+        # ── PE table ──
         pe_rows = []
         for s in sorted(pe_strikes, reverse=True):
             d     = chain_map.get(s, {})
             oi_l  = round(d.get("pe_oi",   0) / 100_000, 1)
             chg_l = round(d.get("pe_chg",  0) / 100_000, 1)
-            pchg  = d.get("pe_pchg", 0)
-            iv    = d.get("pe_iv",   0)
-            emoji, label = oi_signal(d.get("pe_chg", 0), pchg, "PE")
-            atm_tag  = "  ←ATM" if s == atm else ""
-            wall_tag = " 🧱"    if s == pe_wall else ""
+            pchg  = d.get("pe_pchg", 0.0)
+            iv    = d.get("pe_iv",   0.0)
+            em, lb = oi_signal(pchg, "PE")
+            atm_t = "  ←ATM" if s == atm else ""
+            wall  = " 🧱" if s == pe_wall else ""
             pe_rows.append(
                 f"{s:>7,}  {oi_l:>5.1f}L  "
-                f"{('%+.1f' % chg_l) + 'L':>8}  "
-                f"IV{iv:>5.1f}  {emoji} {label}{atm_tag}{wall_tag}"
+                f"{('%+.1f' % chg_l)+'L':>7}  "
+                f"IV{iv:>5.1f}  {em} {lb}{atm_t}{wall}"
             )
 
-        # Key strike callouts for summary
-        ce_adding  = max(ce_strikes,
-                         key=lambda x: chain_map.get(x, {}).get("ce_chg", 0))
-        ce_exiting = min(ce_strikes,
-                         key=lambda x: chain_map.get(x, {}).get("ce_chg", 0))
-        pe_adding  = max(pe_strikes,
-                         key=lambda x: chain_map.get(x, {}).get("pe_chg", 0))
-        pe_exiting = min(pe_strikes,
-                         key=lambda x: chain_map.get(x, {}).get("pe_chg", 0))
-
-        ce_exit_val = chain_map.get(ce_exiting, {}).get("ce_chg", 0)
-        pe_exit_val = chain_map.get(pe_exiting, {}).get("pe_chg", 0)
+        # Key callouts
+        ce_adding  = max(ce_strikes, key=lambda x: chain_map.get(x,{}).get("ce_chg", 0))
+        ce_exiting = min(ce_strikes, key=lambda x: chain_map.get(x,{}).get("ce_chg", 0))
+        pe_adding  = max(pe_strikes, key=lambda x: chain_map.get(x,{}).get("pe_chg", 0))
+        pe_exiting = min(pe_strikes, key=lambda x: chain_map.get(x,{}).get("pe_chg", 0))
+        ce_exit_v  = chain_map.get(ce_exiting, {}).get("ce_chg", 0)
+        pe_exit_v  = chain_map.get(pe_exiting, {}).get("pe_chg", 0)
 
         # ── Compose message ──
-        sep = "─" * 50
-
         header = (
-            f"<b>🔍 {index_name} OI Snapshot  {ist_str()} IST</b>\n"
-            f"Spot <b>₹{spot:,.1f}</b>  ATM <b>{atm:,}</b>  "
-            f"VIX <b>{vix_str}{vix_tag}</b>\n"
-            f"Expiry: {expiry}  PCR: <b>{pcr}</b>  MaxPain: <b>{max_pain_str}</b>\n"
-            f"<i>{pain_tag}</i>\n"
-            f"{sep}"
+            f"<b>\U0001f50d {index_name} OI  {ist_str()} IST</b>\n"
+            f"Spot <b>\u20b9{spot:,.1f}</b>  ATM <b>{atm:,}</b>  VIX <b>{vix_s}{vix_tag}</b>\n"
+            f"Expiry: {expiry_str}  PCR: <b>{pcr}</b>  MaxPain: <b>{pain_str}</b>\n"
+            f"<i>{pain_dir}</i>\n{sep}"
         )
 
         ce_block = (
-            f"\n🔴 <b>CALL SIDE — Sellers cap upside here</b>\n"
-            f"<code>"
-            f" Strike     OI     ΔOI      IV    Signal\n"
-            f"{sep}\n"
+            "\n\U0001f534 <b>CALL SIDE \u2014 Resistance / Sellers</b>\n"
+            f"<code> Strike    OI    \u0394OI     IV   Signal\n{sep}\n"
         )
         for row in ce_rows:
             ce_block += row + "\n"
-        ce_block += f"{sep}\n"
-        ce_block += atm_ce_row + "\n"
-        ce_block += "</code>"
-
-        ce_summary = (
-            f"CE Wall (max OI): <b>{ce_wall:,}</b>  "
-            f"Total: <b>{round(tot_ce/100_000,1)}L</b>\n"
-            f"🔴 Sellers most active at <b>{ce_adding:,}</b>"
+        ce_block += f"{sep}\n{atm_row}\n</code>"
+        ce_block += (
+            f"Wall: <b>{ce_wall:,}</b>  TotalCE: <b>{round(tot_ce/100_000,1)}L</b>\n"
+            f"\U0001f534 Sellers active at <b>{ce_adding:,}</b>"
         )
-        if ce_exit_val < -30_000:
-            ce_summary += f"\n🟢 Covering (shorts exiting) at <b>{ce_exiting:,}</b>"
+        if ce_exit_v < -30_000:
+            ce_block += f"  \U0001f7e2 Covering at <b>{ce_exiting:,}</b>"
 
         pe_block = (
-            f"\n\n🟢 <b>PUT SIDE — Buyers defend support here</b>\n"
-            f"<code>"
-            f" Strike     OI     ΔOI      IV    Signal\n"
-            f"{sep}\n"
+            "\n\n\U0001f7e2 <b>PUT SIDE \u2014 Support / Buyers</b>\n"
+            f"<code> Strike    OI    \u0394OI     IV   Signal\n{sep}\n"
         )
         for row in pe_rows:
             pe_block += row + "\n"
         pe_block += "</code>"
-
-        pe_summary = (
-            f"PE Wall (max OI): <b>{pe_wall:,}</b>  "
-            f"Total: <b>{round(tot_pe/100_000,1)}L</b>\n"
-            f"🟢 Support strongest at <b>{pe_adding:,}</b>"
+        pe_block += (
+            f"Wall: <b>{pe_wall:,}</b>  TotalPE: <b>{round(tot_pe/100_000,1)}L</b>\n"
+            f"\U0001f7e2 Support at <b>{pe_adding:,}</b>"
         )
-        if pe_exit_val < -30_000:
-            pe_summary += f"\n🔴 Unwinding (support leaving) at <b>{pe_exiting:,}</b>"
+        if pe_exit_v < -30_000:
+            pe_block += f"  \U0001f534 Unwinding at <b>{pe_exiting:,}</b>"
 
         footer = (
-            f"\n\n<b>📌 Market Bias</b>\n"
-            f"PCR {pcr} → {pcr_verdict(pcr)}\n"
-            f"CE Wall: <b>{ce_wall:,}</b>  ←resistance\n"
-            f"PE Wall: <b>{pe_wall:,}</b>  ←support\n"
-            f"Range: <b>{pe_wall:,} – {ce_wall:,}</b>"
+            "\n\n<b>\U0001f4cc Bias</b>\n"
+            f"PCR {pcr} \u2192 {pcr_verdict(pcr)}\n"
+            f"Range: <b>{pe_wall:,}</b> (support) \u2192 <b>{ce_wall:,}</b> (resistance)"
         )
 
-        return header + ce_block + ce_summary + pe_block + pe_summary + footer
+        return header + ce_block + pe_block + footer
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return f"⚠️ {index_name} OI error: {e}"
+        import traceback; traceback.print_exc()
+        return f"⚠️ {index_name} OI parse error: {e}"
 
 
 def check_oi_alert(name):
