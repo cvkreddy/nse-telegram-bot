@@ -107,8 +107,9 @@ def fetch_data(token, interval):
         if obj is None:
             return None
 
-        fromdate = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d %H:%M")
-        todate   = datetime.now().strftime("%Y-%m-%d %H:%M")
+        # Use IST time — Render server runs UTC, Angel One expects IST
+        fromdate = (ist_now() - timedelta(days=3)).strftime("%Y-%m-%d %H:%M")
+        todate   = ist_now().strftime("%Y-%m-%d %H:%M")
         params   = {
             "exchange":    "NSE",
             "symboltoken": token,
@@ -263,8 +264,9 @@ def fetch_market_data_bulk(obj, nfo_tokens):
             "mode":           "FULL",
             "exchangeTokens": {"NFO": list(nfo_tokens)}
         }
+        # getMarketData(mode, exchangeTokens) — two positional args
         with ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(obj.getMarketData, params)
+            future = ex.submit(obj.getMarketData, "FULL", {"NFO": list(nfo_tokens)})
             resp   = future.result(timeout=25)
 
         if resp and resp.get("status"):
