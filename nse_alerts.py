@@ -37,14 +37,12 @@ PASSWORD    = os.getenv("PASSWORD")
 TOTP_SECRET = os.getenv("TOTP_SECRET")
 
 SYMBOLS = {
-    "NIFTY":     "26000",
-    "BANKNIFTY": "26009"
+    "NIFTY": "26000"
 }
 
 # NSE weekly option strike step per index
 STRIKE_STEP = {
-    "NIFTY":     50,
-    "BANKNIFTY": 100
+    "NIFTY": 50
 }
 
 smart = None
@@ -160,7 +158,7 @@ def nearest_expiry_str(index_name):
     If today IS the expiry day AND it is after 15:00 IST, skip to next week.
     """
     from datetime import date, timedelta
-    target     = {"NIFTY": 3, "BANKNIFTY": 2}.get(index_name, 3)
+    target     = {"NIFTY": 1}.get(index_name, 1)  # NIFTY weekly = Tuesday since 2024
     today      = date.today()
     days_ahead = (target - today.weekday()) % 7
 
@@ -278,7 +276,7 @@ def analyze_oi(index_name):
     # If nearest expiry fails, try next week's expiry (no .capitalize()!)
     if not rows:
         from datetime import date, timedelta
-        target  = {"NIFTY": 3, "BANKNIFTY": 2}.get(index_name, 3)
+        target  = {"NIFTY": 1}.get(index_name, 1)
         today   = date.today()
         days    = (target - today.weekday()) % 7 + 7
         expiry2 = (today + timedelta(days=days)).strftime("%d%b%Y")
