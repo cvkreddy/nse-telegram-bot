@@ -120,8 +120,10 @@ def fetch_data(token, interval):
             future = ex.submit(_do_fetch, obj, params)
             data   = future.result(timeout=25)
 
+        status  = data.get("status") if data else False
+        message = data.get("message", "?") if data else "None"
+        print(f"[FETCH] status={status} msg={message} rows={len(data.get('data') or []) if data else 0}")
         if not data or not data.get("status") or not data.get("data"):
-            print(f"[FETCH] Bad response")
             return None
 
         rows        = data["data"]
@@ -154,23 +156,49 @@ NSE_HEADERS = {
 }
 
 
+def _make_nse_session():
+    """
+    NSE requires a properly warmed-up session with valid cookies.
+    Visit 2 pages (homepage + options page) before hitting the API.
+    Render server IPs get empty data if session isn't warmed up correctly.
+    """
+    s = requests.Session()
+    try:
+        s.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=15)
+        time.sleep(1.2)
+        s.get("https://www.nseindia.com/option-chain", headers=NSE_HEADERS, timeout=15)
+        time.sleep(1.2)
+    except Exception as e:
+        print(f"[NSE SESSION WARMUP] {e}")
+    return s
+
+
 def fetch_nse_options(symbol):
-    """Fetch NSE options chain. Retries once on failure."""
-    for attempt in range(2):
+    """
+    Fetch NSE options chain with warmed-up session.
+    Retries up to 3 times with fresh session each time.
+    """
+    url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+    for attempt in range(3):
         try:
-            s = requests.Session()
-            # Must hit homepage first to get valid session cookies
-            s.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=15)
-            time.sleep(1)
-            url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-            r   = s.get(url, headers=NSE_HEADERS, timeout=15)
-            if r.status_code == 200:
-                return r.json()
-            print(f"[NSE] HTTP {r.status_code} for {symbol} attempt {attempt+1}")
-            time.sleep(3)
+            s   = _make_nse_session()
+            r   = s.get(url, headers=NSE_HEADERS, timeout=20)
+            print(f"[NSE] {symbol} HTTP {r.status_code} attempt {attempt+1} len={len(r.content)}")
+            if r.status_code != 200:
+                time.sleep(4)
+                continue
+            data = r.json()
+            # Validate: underlyingValue must be non-zero and data must have rows
+            uv   = float(data.get("records", {}).get("underlyingValue", 0))
+            rows = data.get("records", {}).get("data", [])
+            if uv > 0 and len(rows) > 0:
+                print(f"[NSE] {symbol} OK — spot={uv} rows={len(rows)}")
+                return data
+            print(f"[NSE] {symbol} Empty/zero data (uv={uv} rows={len(rows)}) attempt {attempt+1}")
+            time.sleep(4)
         except Exception as e:
             print(f"[NSE ERROR] {symbol} attempt {attempt+1}: {e}")
-            time.sleep(3)
+            time.sleep(4)
     return None
 
 
@@ -255,10 +283,25 @@ def analyze_oi(index_name):
     try:
         records  = raw.get("records", {})
         filtered = raw.get("filtered", {})
-        spot     = float(records.get("underlyingValue", 0))
-        expiry   = records.get("expiryDates", ["?"])[0]   # nearest expiry
         step     = STRIKE_STEP[index_name]
-        atm      = round(spot / step) * step
+
+        # --- Spot price: try records first, then dig into data rows ---
+        spot = float(records.get("underlyingValue", 0))
+        if spot == 0:
+            # Fallback: pull underlyingValue from first CE or PE row that has it
+            for row in records.get("data", []):
+                for side in ("CE", "PE"):
+                    uv = float((row.get(side) or {}).get("underlyingValue", 0))
+                    if uv > 0:
+                        spot = uv
+                        break
+                if spot > 0:
+                    break
+        if spot == 0:
+            return f"⚠️ {index_name} OI: spot price is 0 — NSE may be blocking. Try later."
+
+        atm    = round(spot / step) * step
+        expiry = records.get("expiryDates", ["?"])[0]
 
         # Strikes to show: CE = ATM+1 to ATM+5 (above), PE = ATM to ATM-5
         ce_strikes = [atm + i * step for i in range(1, 6)]
@@ -514,12 +557,13 @@ def analyze(df):
 # ===== CHECK SYMBOL =====
 def check_symbol(name, token, tf):
     try:
-        print(f"[CHECK] {name} {tf} at {ist_str()}")
         interval = "FIVE_MINUTE" if tf == "5M" else "FIFTEEN_MINUTE"
+        print(f"[CHECK] {name} {tf} interval={interval} at {ist_str()}")
         df       = fetch_data(token, interval)
 
         if df is None or len(df) < 20:
-            print(f"[CHECK] {name} {tf} — insufficient data")
+            cnt = len(df) if df is not None else 0
+            print(f"[CHECK] {name} {tf} — insufficient data ({cnt} rows) — skipping candle alert")
             return
 
         df['ema7']  = EMAIndicator(df['Close'], 10).ema_indicator()
