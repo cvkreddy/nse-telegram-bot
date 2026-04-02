@@ -266,8 +266,18 @@ def analyze_oi(index_name):
         all_watch  = set(ce_strikes + pe_strikes)
 
         # Parse options chain into lookup dict
+        # NSE expiryDate in data rows may differ from records.expiryDates list
+        # Detect actual nearest expiry from data rows (most common = weekly)
+        from collections import Counter
+        all_rows = records.get("data", [])
+        expiry_counts = Counter(
+            r.get("expiryDate", "") for r in all_rows if r.get("expiryDate")
+        )
+        if expiry_counts:
+            expiry = expiry_counts.most_common(1)[0][0]
+
         chain_map = {}
-        for row in records.get("data", []):
+        for row in all_rows:
             if row.get("expiryDate") != expiry:
                 continue
             s  = int(row.get("strikePrice", 0))
@@ -285,6 +295,7 @@ def analyze_oi(index_name):
                 "pe_iv":   float(pe.get("impliedVolatility",      0)),
                 "pe_ltp":  float(pe.get("lastPrice",              0)),
             }
+        print(f"[OI] {index_name} expiry={expiry} strikes_loaded={len(chain_map)}")
 
         # Totals and derived metrics
         tot_ce = int(filtered.get("CE", {}).get("totOI", 0))
@@ -292,9 +303,16 @@ def analyze_oi(index_name):
         pcr    = round(tot_pe / tot_ce, 2) if tot_ce > 0 else 0
 
         max_pain  = calc_max_pain(chain_map)
-        pain_diff = round(spot - max_pain) if max_pain else 0
-        pain_tag  = (f"Spot {abs(pain_diff)}pts "
-                     f"{'BELOW ↓' if pain_diff < 0 else 'ABOVE ↑'} MaxPain")
+        # Fallback: if chain_map was empty (expiry filter too strict), retry without filter
+        if max_pain is None and chain_map:
+            max_pain = max(chain_map, key=lambda s: chain_map[s]["ce_oi"] + chain_map[s]["pe_oi"])
+        pain_diff = round(spot - max_pain) if max_pain is not None else 0
+        pain_tag  = (
+            f"Spot {abs(pain_diff)}pts "
+            f"{'BELOW ↓' if pain_diff < 0 else 'ABOVE ↑'} MaxPain"
+            if max_pain is not None else "MaxPain: N/A"
+        )
+        max_pain_str = f"{max_pain:,}" if max_pain is not None else "N/A"
 
         vix     = fetch_india_vix()
         vix_str = str(vix) if vix else "N/A"
@@ -374,7 +392,7 @@ def analyze_oi(index_name):
             f"<b>🔍 {index_name} OI Snapshot  {ist_str()} IST</b>\n"
             f"Spot <b>₹{spot:,.1f}</b>  ATM <b>{atm:,}</b>  "
             f"VIX <b>{vix_str}{vix_tag}</b>\n"
-            f"Expiry: {expiry}  PCR: <b>{pcr}</b>  MaxPain: <b>{max_pain:,}</b>\n"
+            f"Expiry: {expiry}  PCR: <b>{pcr}</b>  MaxPain: <b>{max_pain_str}</b>\n"
             f"<i>{pain_tag}</i>\n"
             f"{sep}"
         )
