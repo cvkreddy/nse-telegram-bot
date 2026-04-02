@@ -181,15 +181,18 @@ def fetch_option_greeks(obj, index_name, expiry_str):
     Returns list of dicts (one per strike/type) or None on failure.
     """
     try:
-        params = {"name": index_name, "expirydate": expiry_str}
         print(f"[OI] getOptionGreeks {index_name} expiry={expiry_str}")
         with ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(obj.getOptionGreeks, params)
+            # getOptionGreeks(name, expirydate) — two positional args, NOT a dict
+            future = ex.submit(obj.getOptionGreeks, index_name, expiry_str)
             resp   = future.result(timeout=25)
         if resp and resp.get("status") and resp.get("data"):
             print(f"[OI] Got {len(resp['data'])} rows for {index_name}")
             return resp["data"]
-        print(f"[OI] Empty response: {resp.get('message','?') if resp else 'None'}")
+        # Log full response so we can debug format issues
+        print(f"[OI] Failed response: status={resp.get('status') if resp else 'None'} "
+              f"msg={resp.get('message','?') if resp else 'None'} "
+              f"errorCode={resp.get('errorCode','?') if resp else 'None'}")
         return None
     except FuturesTimeout:
         print(f"[OI] getOptionGreeks timeout for {index_name}")
