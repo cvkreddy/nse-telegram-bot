@@ -154,17 +154,27 @@ import math
 
 def nearest_expiry_str(index_name):
     """
-    Calculate the nearest weekly expiry date string
-    in Angel One format: e.g. '03Apr2025'
-    NIFTY    → Thursday (weekday 3)
-    BANKNIFTY → Wednesday (weekday 2)
+    Calculate nearest weekly expiry in Angel One format: e.g. '03Apr2026'
+    NIFTY     -> Thursday (weekday 3)
+    BANKNIFTY -> Wednesday (weekday 2)
+    If today IS the expiry day AND it is after 15:00 IST, skip to next week.
     """
     from datetime import date, timedelta
-    target = {"NIFTY": 3, "BANKNIFTY": 2}.get(index_name, 3)
-    today  = date.today()
-    days   = (target - today.weekday()) % 7
-    expiry = today + timedelta(days=days)
-    return expiry.strftime("%d%b%Y").capitalize()   # e.g. "03Apr2025"
+    target     = {"NIFTY": 3, "BANKNIFTY": 2}.get(index_name, 3)
+    today      = date.today()
+    days_ahead = (target - today.weekday()) % 7
+
+    # If today is expiry day, check whether market has already closed
+    if days_ahead == 0:
+        now_ist = ist_now()
+        # After 15:00 IST the expiry is essentially done — use next week
+        if now_ist.hour >= 15:
+            days_ahead = 7
+
+    expiry = today + timedelta(days=days_ahead)
+    # strftime("%b") gives "Apr" on all platforms — do NOT call .capitalize()
+    # which would turn "02Apr2026" into "02apr2026" (digit as first char)
+    return expiry.strftime("%d%b%Y")   # e.g. "03Apr2026"
 
 
 def fetch_option_greeks(obj, index_name, expiry_str):
@@ -265,13 +275,13 @@ def analyze_oi(index_name):
     expiry_str = nearest_expiry_str(index_name)
     rows       = fetch_option_greeks(obj, index_name, expiry_str)
 
-    # If nearest expiry fails, try next week's expiry
+    # If nearest expiry fails, try next week's expiry (no .capitalize()!)
     if not rows:
         from datetime import date, timedelta
         target  = {"NIFTY": 3, "BANKNIFTY": 2}.get(index_name, 3)
         today   = date.today()
         days    = (target - today.weekday()) % 7 + 7
-        expiry2 = (today + timedelta(days=days)).strftime("%d%b%Y").capitalize()
+        expiry2 = (today + timedelta(days=days)).strftime("%d%b%Y")
         print(f"[OI] Retrying with next expiry {expiry2}")
         rows    = fetch_option_greeks(obj, index_name, expiry2)
         if rows:
