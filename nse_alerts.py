@@ -14,6 +14,10 @@ def run_web():
 Thread(target=run_web, daemon=True).start()
 
 
+# ===== UNBUFFERED OUTPUT (so Render logs appear immediately) =====
+import sys
+sys.stdout.reconfigure(line_buffering=True)
+
 # ===== IMPORTS =====
 import requests
 import pandas as pd
@@ -140,86 +144,144 @@ def fetch_data(token, interval):
 
 
 # ======================================================
-# ===== OI via Angel One getOptionGreeks (no NSE) ======
+# ===== OI via Symbol Master + getMarketData ===========
 # ======================================================
-# NSE direct API is blocked on server IPs (Render/AWS etc.)
-# Angel One's getOptionGreeks API uses your authenticated
-# session — no IP restriction, reliable live data.
+# getOptionGreeks is unreliable across Angel One accounts.
+# This approach:
+#   1. Downloads Angel One's public symbol master (no auth)
+#   2. Gets NIFTY spot via ltpData (token 26000)
+#   3. Finds ATM±5 strike tokens from master
+#   4. Fetches live OI via getMarketData FULL (bulk, authenticated)
+# Works 100% on server IPs — no NSE scraping.
 
 from collections import Counter
-import math
+from datetime import date
+
+SCRIP_MASTER_URL = (
+    "https://margincalculator.angelbroking.com"
+    "/OpenAPI_File/files/OpenAPIScripMaster.json"
+)
+_scrip_cache = {"date": None, "data": None}
+
+
+def get_scrip_master():
+    """Download & cache Angel One symbol master once per day."""
+    today = date.today().isoformat()
+    if _scrip_cache["date"] == today and _scrip_cache["data"]:
+        return _scrip_cache["data"]
+    print("[SCRIP] Downloading symbol master...", flush=True)
+    try:
+        r = requests.get(SCRIP_MASTER_URL, timeout=30)
+        data = r.json()
+        _scrip_cache["date"]  = today
+        _scrip_cache["data"]  = data
+        print(f"[SCRIP] Downloaded {len(data)} symbols", flush=True)
+        return data
+    except Exception as e:
+        print(f"[SCRIP ERROR] {e}", flush=True)
+        return []
 
 
 def nearest_expiry_str(index_name):
     """
-    Calculate nearest weekly expiry in Angel One format: e.g. '03Apr2026'
-    NIFTY     -> Thursday (weekday 3)
-    BANKNIFTY -> Wednesday (weekday 2)
-    If today IS the expiry day AND it is after 15:00 IST, skip to next week.
+    NIFTY weekly expiry = Tuesday (weekday 1) since Sept 2024.
+    Returns format '07Apr2026'.
+    If today IS expiry day and after 15:00 IST, use next week.
     """
-    from datetime import date, timedelta
-    target     = {"NIFTY": 1}.get(index_name, 1)  # NIFTY weekly = Tuesday since 2024
+    from datetime import timedelta
+    target     = {"NIFTY": 1}.get(index_name, 1)
     today      = date.today()
     days_ahead = (target - today.weekday()) % 7
-
-    # If today is expiry day, check whether market has already closed
-    if days_ahead == 0:
-        now_ist = ist_now()
-        # After 15:00 IST the expiry is essentially done — use next week
-        if now_ist.hour >= 15:
-            days_ahead = 7
-
+    if days_ahead == 0 and ist_now().hour >= 15:
+        days_ahead = 7
     expiry = today + timedelta(days=days_ahead)
-    # strftime("%b") gives "Apr" on all platforms — do NOT call .capitalize()
-    # which would turn "02Apr2026" into "02apr2026" (digit as first char)
-    return expiry.strftime("%d%b%Y")   # e.g. "03Apr2026"
+    return expiry.strftime("%d%b%Y")   # e.g. "07Apr2026"
 
 
-def fetch_option_greeks(obj, index_name, expiry_str):
-    """
-    Call Angel One getOptionGreeks for a given index + expiry.
-    Returns list of dicts (one per strike/type) or None on failure.
-    """
+def get_nifty_spot(obj):
+    """Get live NIFTY spot price from Angel One."""
     try:
-        print(f"[OI] getOptionGreeks {index_name} expiry={expiry_str}")
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            # getOptionGreeks(name, expirydate) — two positional args, NOT a dict
-            future = ex.submit(obj.getOptionGreeks, index_name, expiry_str)
-            resp   = future.result(timeout=25)
-        if resp and resp.get("status") and resp.get("data"):
-            print(f"[OI] Got {len(resp['data'])} rows for {index_name}")
-            return resp["data"]
-        # Log full response so we can debug format issues
-        print(f"[OI] Failed response: status={resp.get('status') if resp else 'None'} "
-              f"msg={resp.get('message','?') if resp else 'None'} "
-              f"errorCode={resp.get('errorCode','?') if resp else 'None'}")
-        return None
-    except FuturesTimeout:
-        print(f"[OI] getOptionGreeks timeout for {index_name}")
-        return None
-    except Exception as e:
-        print(f"[OI] getOptionGreeks error {index_name}: {e}")
-        return None
-
-
-def fetch_india_vix_angel(obj):
-    """Fetch India VIX using Angel One LTP endpoint (token 26017 = INDIA VIX)."""
-    try:
-        params = {"mode": "LTP", "exchangeTokens": {"NSE": ["26017"]}}
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(obj.getMarketData, "LTP", "NSE", "26017")
-            resp   = future.result(timeout=10)
+        resp = obj.ltpData("NSE", "NIFTY", "26000")
         if resp and resp.get("status"):
-            fetched = resp.get("data", {}).get("fetched", [])
-            if fetched:
-                return round(float(fetched[0].get("ltp", 0)), 2)
+            ltp = float(resp["data"].get("ltp", 0))
+            print(f"[SPOT] NIFTY spot = {ltp}", flush=True)
+            return ltp
     except Exception as e:
-        print(f"[VIX] {e}")
-    return None
+        print(f"[SPOT ERROR] {e}", flush=True)
+    return 0.0
+
+
+def find_option_tokens(expiry_str, strikes):
+    """
+    Find NFO tokens for NIFTY CE/PE at given strikes & expiry.
+    Symbol master stores expiry as '07APR2026' (all caps).
+    Strike is stored as actual price * 100 in the master.
+    Returns dict: (strike_int, 'CE'/'PE') -> token_str
+    """
+    master       = get_scrip_master()
+    expiry_upper = expiry_str.upper()        # "07APR2026"
+    strike_set   = set(strikes)
+    token_map    = {}
+
+    for row in master:
+        if row.get("exch_seg")      != "NFO":      continue
+        if row.get("instrumenttype")!= "OPTIDX":   continue
+        if row.get("name",  "")     != "NIFTY":    continue
+        if row.get("expiry","")     != expiry_upper: continue
+
+        symbol = row.get("symbol", "")
+        otype  = "CE" if symbol.endswith("CE") else \
+                 "PE" if symbol.endswith("PE") else None
+        if not otype:
+            continue
+
+        # Angel One stores strike * 100 as an integer string
+        try:
+            raw_strike = float(row.get("strike", 0))
+            # If > 1_000_000 it's stored *100, otherwise direct
+            strike = int(raw_strike / 100) if raw_strike > 100_000 else int(raw_strike)
+        except Exception:
+            continue
+
+        if strike in strike_set:
+            token_map[(strike, otype)] = str(row["token"])
+
+    print(f"[TOKENS] Found {len(token_map)} tokens for {expiry_upper} "
+          f"strikes={sorted(strike_set)}", flush=True)
+    return token_map
+
+
+def fetch_market_data_bulk(obj, nfo_tokens):
+    """
+    Bulk-fetch FULL market data for up to 50 NFO tokens.
+    Returns dict: token_str -> data_dict
+    """
+    if not nfo_tokens:
+        return {}
+    try:
+        params = {
+            "mode":           "FULL",
+            "exchangeTokens": {"NFO": list(nfo_tokens)}
+        }
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(obj.getMarketData, params)
+            resp   = future.result(timeout=25)
+
+        if resp and resp.get("status"):
+            result = {}
+            for item in resp.get("data", {}).get("fetched", []):
+                result[str(item.get("symbolToken", ""))] = item
+            print(f"[MKTDATA] Fetched {len(result)} tokens", flush=True)
+            return result
+        print(f"[MKTDATA] Failed: {resp.get('message') if resp else 'None'}", flush=True)
+    except FuturesTimeout:
+        print("[MKTDATA] Timeout", flush=True)
+    except Exception as e:
+        print(f"[MKTDATA ERROR] {e}", flush=True)
+    return {}
 
 
 def calc_max_pain(chain_map):
-    """Max Pain = strike where total OI writer loss is minimum."""
     try:
         strikes = sorted(chain_map.keys())
         if not strikes:
@@ -233,24 +295,23 @@ def calc_max_pain(chain_map):
             pain[K] = loss
         return min(pain, key=pain.get)
     except Exception as e:
-        print(f"[MAXPAIN] {e}")
+        print(f"[MAXPAIN] {e}", flush=True)
         return None
 
 
 def oi_signal(pchg, side):
-    """Classify OI activity from % change."""
     if side == "CE":
-        if   pchg >  40: return "🔴🔴", "HEAVY SHORT ⚠"
+        if   pchg >  40: return "🔴🔴", "HEAVY SHORT"
         elif pchg >  15: return "🔴",   "Shorts Adding"
         elif pchg >   3: return "🔺",   "Adding"
-        elif pchg < -15: return "🟢",   "Short Covering"
+        elif pchg < -15: return "🟢",   "Covering"
         elif pchg <  -3: return "🟡",   "Exiting"
         else:            return "⚪",   "Stable"
     else:
-        if   pchg >  40: return "🟢🟢", "STRONG SUPP ⚠"
-        elif pchg >  15: return "🟢",   "Support Adding"
+        if   pchg >  40: return "🟢🟢", "STRONG SUPP"
+        elif pchg >  15: return "🟢",   "Supp Adding"
         elif pchg >   3: return "🔺",   "Adding"
-        elif pchg < -15: return "🔴",   "Support Falling"
+        elif pchg < -15: return "🔴",   "Supp Falling"
         elif pchg <  -3: return "🟡",   "Unwinding"
         else:            return "⚪",   "Stable"
 
@@ -264,206 +325,175 @@ def pcr_verdict(pcr):
 
 
 def analyze_oi(index_name):
-    """
-    Full OI analysis using Angel One getOptionGreeks.
-    ATM±5 strikes, CE/PE walls, PCR, MaxPain.
-    """
+    """Full OI analysis via symbol master + getMarketData."""
     obj = smart_login()
     if obj is None:
         return f"⚠️ {index_name} OI: login failed"
 
     step       = STRIKE_STEP[index_name]
     expiry_str = nearest_expiry_str(index_name)
-    rows       = fetch_option_greeks(obj, index_name, expiry_str)
+    print(f"[OI] {index_name} expiry={expiry_str}", flush=True)
 
-    # If nearest expiry fails, try next week's expiry (no .capitalize()!)
-    if not rows:
-        from datetime import date, timedelta
-        target  = {"NIFTY": 1}.get(index_name, 1)
-        today   = date.today()
-        days    = (target - today.weekday()) % 7 + 7
-        expiry2 = (today + timedelta(days=days)).strftime("%d%b%Y")
-        print(f"[OI] Retrying with next expiry {expiry2}")
-        rows    = fetch_option_greeks(obj, index_name, expiry2)
-        if rows:
-            expiry_str = expiry2
+    # Step 1: Get spot price
+    spot = get_nifty_spot(obj)
+    if spot == 0:
+        return f"⚠️ {index_name} OI: spot price unavailable"
+    atm = round(spot / step) * step
 
-    if not rows:
-        return f"⚠️ {index_name} OI: no data from Angel One (expiry={expiry_str})"
+    # Step 2: Define ATM±5 strikes
+    ce_strikes = [atm + i * step for i in range(1, 6)]
+    pe_strikes = [atm - i * step for i in range(0, 6)]
+    all_strikes = list(set(ce_strikes + pe_strikes))
 
-    try:
-        # Build chain_map: strike -> {ce_oi, ce_chg, ce_pchg, ce_iv, pe_oi, ...}
-        chain_map = {}
-        spot      = 0.0
+    # Step 3: Find tokens from symbol master
+    token_map = find_option_tokens(expiry_str, all_strikes)
 
-        for r in rows:
-            s     = int(float(r.get("strikeprice", 0)))
-            otype = str(r.get("optiontype", "")).upper()
-            uv    = float(r.get("underlyingValue", 0) or 0)
-            if uv > 0:
-                spot = uv
+    # Retry next week's expiry if no tokens found
+    if len(token_map) < 4:
+        from datetime import timedelta
+        target     = {"NIFTY": 1}.get(index_name, 1)
+        today      = date.today()
+        days       = (target - today.weekday()) % 7 + 7
+        expiry_str = (today + timedelta(days=days)).strftime("%d%b%Y")
+        print(f"[OI] Retrying with {expiry_str}", flush=True)
+        token_map  = find_option_tokens(expiry_str, all_strikes)
 
-            if s not in chain_map:
-                chain_map[s] = {
-                    "ce_oi": 0, "ce_chg": 0, "ce_pchg": 0.0,
-                    "ce_iv": 0.0, "ce_ltp": 0.0,
-                    "pe_oi": 0, "pe_chg": 0, "pe_pchg": 0.0,
-                    "pe_iv": 0.0, "pe_ltp": 0.0,
-                }
+    if not token_map:
+        return f"⚠️ {index_name} OI: no tokens found for {expiry_str} in symbol master"
 
-            oi    = int(float(r.get("openInterest",         0) or 0))
-            chg   = int(float(r.get("changeinOpenInterest", 0) or 0))
-            pchg  = float(r.get("percentChangeinOpenInterest", 0) or 0)
-            iv    = float(r.get("impliedVolatility",        0) or 0)
-            ltp   = float(r.get("lastPrice",                0) or 0)
+    # Step 4: Fetch live market data for all tokens
+    all_tokens   = list(token_map.values())
+    mkt_data     = fetch_market_data_bulk(obj, all_tokens)
 
-            if otype == "CE":
-                chain_map[s].update(ce_oi=oi, ce_chg=chg,
-                                    ce_pchg=pchg, ce_iv=iv, ce_ltp=ltp)
-            elif otype == "PE":
-                chain_map[s].update(pe_oi=oi, pe_chg=chg,
-                                    pe_pchg=pchg, pe_iv=iv, pe_ltp=ltp)
+    # Step 5: Build chain_map from market data
+    chain_map = {}
+    for (strike, otype), token in token_map.items():
+        d = mkt_data.get(token, {})
+        if strike not in chain_map:
+            chain_map[strike] = {
+                "ce_oi": 0, "ce_chg": 0, "ce_pchg": 0.0, "ce_iv": 0.0,
+                "pe_oi": 0, "pe_chg": 0, "pe_pchg": 0.0, "pe_iv": 0.0,
+            }
+        oi   = int(float(d.get("opnInterest",       0) or 0))
+        chg  = int(float(d.get("netChange",         0) or 0))
+        iv   = float(d.get("impliedVolatility",     0) or 0)
+        ltp  = float(d.get("ltp",                   0) or 0)
+        pchg = round(chg / oi * 100, 2) if oi > 0 else 0.0
 
-        if spot == 0:
-            # Fallback: estimate spot from ATM CE+PE midpoint
-            if chain_map:
-                mid = sorted(chain_map.keys())[len(chain_map)//2]
-                spot = float(mid)
+        if otype == "CE":
+            chain_map[strike].update(ce_oi=oi, ce_chg=chg, ce_pchg=pchg, ce_iv=iv)
+        else:
+            chain_map[strike].update(pe_oi=oi, pe_chg=chg, pe_pchg=pchg, pe_iv=iv)
 
-        atm = round(spot / step) * step
+    # Step 6: Metrics
+    tot_ce   = sum(v["ce_oi"] for v in chain_map.values())
+    tot_pe   = sum(v["pe_oi"] for v in chain_map.values())
+    pcr      = round(tot_pe / tot_ce, 2) if tot_ce > 0 else 0.0
+    max_pain = calc_max_pain(chain_map)
+    pain_str = f"{max_pain:,}" if max_pain else "N/A"
+    pain_dir = ""
+    if max_pain:
+        diff     = round(spot - max_pain)
+        pain_dir = f"Spot {abs(diff)}pts {'BELOW' if diff < 0 else 'ABOVE'} MaxPain"
 
-        # ATM ± 5 strikes
-        ce_strikes = [atm + i * step for i in range(1, 6)]
-        pe_strikes = [atm - i * step for i in range(0, 6)]
+    # Step 7: CE wall & PE wall
+    ce_oi_map = {s: chain_map.get(s, {}).get("ce_oi", 0) for s in ce_strikes}
+    pe_oi_map = {s: chain_map.get(s, {}).get("pe_oi", 0) for s in pe_strikes if s != atm}
+    ce_wall   = max(ce_oi_map, key=ce_oi_map.get)
+    pe_wall   = max(pe_oi_map, key=pe_oi_map.get) if pe_oi_map else atm
 
-        # Totals for PCR
-        tot_ce = sum(v["ce_oi"] for v in chain_map.values())
-        tot_pe = sum(v["pe_oi"] for v in chain_map.values())
-        pcr    = round(tot_pe / tot_ce, 2) if tot_ce > 0 else 0.0
+    sep = "\u2500" * 46
 
-        # MaxPain
-        max_pain     = calc_max_pain(chain_map)
-        pain_diff    = round(spot - max_pain) if max_pain else 0
-        pain_str     = f"{max_pain:,}" if max_pain else "N/A"
-        pain_dir     = (
-            f"Spot {abs(pain_diff)}pts {'BELOW ↓' if pain_diff < 0 else 'ABOVE ↑'} MaxPain"
-            if max_pain else ""
+    # Step 8: Build CE rows (resistance, ATM+1 → ATM+5)
+    ce_rows = []
+    for s in sorted(ce_strikes, reverse=True):
+        d     = chain_map.get(s, {})
+        oi_l  = round(d.get("ce_oi",   0) / 100_000, 1)
+        chg_l = round(d.get("ce_chg",  0) / 100_000, 1)
+        pchg  = d.get("ce_pchg", 0.0)
+        iv    = d.get("ce_iv",   0.0)
+        em, lb = oi_signal(pchg, "CE")
+        wall  = " \U0001f9f1" if s == ce_wall else ""
+        ce_rows.append(
+            f"{s:>7,}  {oi_l:>5.1f}L  "
+            f"{('%+.1f' % chg_l)+'L':>7}  "
+            f"IV{iv:>5.1f}  {em} {lb}{wall}"
         )
 
-        # VIX (best-effort)
-        vix     = fetch_india_vix_angel(obj)
-        vix_s   = str(vix) if vix else "N/A"
-        vix_tag = " 🔥HIGH" if vix and vix > 20 else " ✅OK" if vix else ""
+    # ATM row (CE side)
+    d0       = chain_map.get(atm, {})
+    atm_oi   = round(d0.get("ce_oi",  0) / 100_000, 1)
+    atm_chg  = round(d0.get("ce_chg", 0) / 100_000, 1)
+    atm_em, atm_lb = oi_signal(d0.get("ce_pchg", 0), "CE")
+    atm_row  = (f"{'*'+str(atm):>7}  {atm_oi:>5.1f}L  "
+                f"{('%+.1f' % atm_chg)+'L':>7}  "
+                f"IV{d0.get('ce_iv',0):>5.1f}  {atm_em} {atm_lb}  <-ATM")
 
-        # CE wall (highest OI among ATM+1..ATM+5)
-        ce_oi_map = {s: chain_map.get(s, {}).get("ce_oi", 0) for s in ce_strikes}
-        ce_wall   = max(ce_oi_map, key=ce_oi_map.get)
-
-        pe_oi_map = {s: chain_map.get(s, {}).get("pe_oi", 0)
-                     for s in pe_strikes if s != atm}
-        pe_wall   = max(pe_oi_map, key=pe_oi_map.get) if pe_oi_map else atm
-
-        # ── CE table ──
-        sep     = "─" * 48
-        ce_rows = []
-        for s in sorted(ce_strikes, reverse=True):
-            d     = chain_map.get(s, {})
-            oi_l  = round(d.get("ce_oi",   0) / 100_000, 1)
-            chg_l = round(d.get("ce_chg",  0) / 100_000, 1)
-            pchg  = d.get("ce_pchg", 0.0)
-            iv    = d.get("ce_iv",   0.0)
-            em, lb = oi_signal(pchg, "CE")
-            wall  = " 🧱" if s == ce_wall else ""
-            ce_rows.append(
-                f"{s:>7,}  {oi_l:>5.1f}L  "
-                f"{('%+.1f' % chg_l)+'L':>7}  "
-                f"IV{iv:>5.1f}  {em} {lb}{wall}"
-            )
-
-        # ATM boundary row (CE side)
-        d0       = chain_map.get(atm, {})
-        atm_oi   = round(d0.get("ce_oi",  0) / 100_000, 1)
-        atm_chg  = round(d0.get("ce_chg", 0) / 100_000, 1)
-        atm_iv   = d0.get("ce_iv", 0.0)
-        atm_em, atm_lb = oi_signal(d0.get("ce_pchg", 0), "CE")
-        atm_row  = (
-            f"{'★'+str(atm):>7}  {atm_oi:>5.1f}L  "
-            f"{('%+.1f' % atm_chg)+'L':>7}  "
-            f"IV{atm_iv:>5.1f}  {atm_em} {atm_lb}  ←ATM"
+    # PE rows (support, ATM → ATM-5)
+    pe_rows = []
+    for s in sorted(pe_strikes, reverse=True):
+        d     = chain_map.get(s, {})
+        oi_l  = round(d.get("pe_oi",   0) / 100_000, 1)
+        chg_l = round(d.get("pe_chg",  0) / 100_000, 1)
+        pchg  = d.get("pe_pchg", 0.0)
+        iv    = d.get("pe_iv",   0.0)
+        em, lb = oi_signal(pchg, "PE")
+        atm_t = "  <-ATM" if s == atm else ""
+        wall  = " \U0001f9f1" if s == pe_wall else ""
+        pe_rows.append(
+            f"{s:>7,}  {oi_l:>5.1f}L  "
+            f"{('%+.1f' % chg_l)+'L':>7}  "
+            f"IV{iv:>5.1f}  {em} {lb}{atm_t}{wall}"
         )
 
-        # ── PE table ──
-        pe_rows = []
-        for s in sorted(pe_strikes, reverse=True):
-            d     = chain_map.get(s, {})
-            oi_l  = round(d.get("pe_oi",   0) / 100_000, 1)
-            chg_l = round(d.get("pe_chg",  0) / 100_000, 1)
-            pchg  = d.get("pe_pchg", 0.0)
-            iv    = d.get("pe_iv",   0.0)
-            em, lb = oi_signal(pchg, "PE")
-            atm_t = "  ←ATM" if s == atm else ""
-            wall  = " 🧱" if s == pe_wall else ""
-            pe_rows.append(
-                f"{s:>7,}  {oi_l:>5.1f}L  "
-                f"{('%+.1f' % chg_l)+'L':>7}  "
-                f"IV{iv:>5.1f}  {em} {lb}{atm_t}{wall}"
-            )
+    # Key callouts
+    ce_adding  = max(ce_strikes, key=lambda x: chain_map.get(x,{}).get("ce_chg", 0))
+    pe_adding  = max(pe_strikes, key=lambda x: chain_map.get(x,{}).get("pe_chg", 0))
+    ce_exit_v  = min(chain_map.get(s,{}).get("ce_chg",0) for s in ce_strikes)
+    pe_exit_v  = min(chain_map.get(s,{}).get("pe_chg",0) for s in pe_strikes)
+    ce_exiting = min(ce_strikes, key=lambda x: chain_map.get(x,{}).get("ce_chg",0))
+    pe_exiting = min(pe_strikes, key=lambda x: chain_map.get(x,{}).get("pe_chg",0))
 
-        # Key callouts
-        ce_adding  = max(ce_strikes, key=lambda x: chain_map.get(x,{}).get("ce_chg", 0))
-        ce_exiting = min(ce_strikes, key=lambda x: chain_map.get(x,{}).get("ce_chg", 0))
-        pe_adding  = max(pe_strikes, key=lambda x: chain_map.get(x,{}).get("pe_chg", 0))
-        pe_exiting = min(pe_strikes, key=lambda x: chain_map.get(x,{}).get("pe_chg", 0))
-        ce_exit_v  = chain_map.get(ce_exiting, {}).get("ce_chg", 0)
-        pe_exit_v  = chain_map.get(pe_exiting, {}).get("pe_chg", 0)
+    header = (
+        f"<b>\U0001f50d NIFTY OI  {ist_str()} IST</b>\n"
+        f"Spot <b>\u20b9{spot:,.1f}</b>  ATM <b>{atm:,}</b>\n"
+        f"Expiry: {expiry_str}  PCR: <b>{pcr}</b>  MaxPain: <b>{pain_str}</b>\n"
+        f"<i>{pain_dir}</i>\n{sep}"
+    )
+    ce_block = (
+        "\n\U0001f534 <b>CALL SIDE \u2014 Resistance</b>\n"
+        f"<code> Strike    OI    \u0394OI     IV   Signal\n{sep}\n"
+    )
+    for row in ce_rows:
+        ce_block += row + "\n"
+    ce_block += f"{sep}\n{atm_row}\n</code>"
+    ce_block += (
+        f"Wall: <b>{ce_wall:,}</b>  TotalCE: <b>{round(tot_ce/100_000,1)}L</b>\n"
+        f"\U0001f534 Shorts adding at <b>{ce_adding:,}</b>"
+    )
+    if ce_exit_v < -5_000:
+        ce_block += f"  \U0001f7e2 Covering at <b>{ce_exiting:,}</b>"
 
-        # ── Compose message ──
-        header = (
-            f"<b>\U0001f50d {index_name} OI  {ist_str()} IST</b>\n"
-            f"Spot <b>\u20b9{spot:,.1f}</b>  ATM <b>{atm:,}</b>  VIX <b>{vix_s}{vix_tag}</b>\n"
-            f"Expiry: {expiry_str}  PCR: <b>{pcr}</b>  MaxPain: <b>{pain_str}</b>\n"
-            f"<i>{pain_dir}</i>\n{sep}"
-        )
+    pe_block = (
+        "\n\n\U0001f7e2 <b>PUT SIDE \u2014 Support</b>\n"
+        f"<code> Strike    OI    \u0394OI     IV   Signal\n{sep}\n"
+    )
+    for row in pe_rows:
+        pe_block += row + "\n"
+    pe_block += "</code>"
+    pe_block += (
+        f"Wall: <b>{pe_wall:,}</b>  TotalPE: <b>{round(tot_pe/100_000,1)}L</b>\n"
+        f"\U0001f7e2 Support adding at <b>{pe_adding:,}</b>"
+    )
+    if pe_exit_v < -5_000:
+        pe_block += f"  \U0001f534 Unwinding at <b>{pe_exiting:,}</b>"
 
-        ce_block = (
-            "\n\U0001f534 <b>CALL SIDE \u2014 Resistance / Sellers</b>\n"
-            f"<code> Strike    OI    \u0394OI     IV   Signal\n{sep}\n"
-        )
-        for row in ce_rows:
-            ce_block += row + "\n"
-        ce_block += f"{sep}\n{atm_row}\n</code>"
-        ce_block += (
-            f"Wall: <b>{ce_wall:,}</b>  TotalCE: <b>{round(tot_ce/100_000,1)}L</b>\n"
-            f"\U0001f534 Sellers active at <b>{ce_adding:,}</b>"
-        )
-        if ce_exit_v < -30_000:
-            ce_block += f"  \U0001f7e2 Covering at <b>{ce_exiting:,}</b>"
-
-        pe_block = (
-            "\n\n\U0001f7e2 <b>PUT SIDE \u2014 Support / Buyers</b>\n"
-            f"<code> Strike    OI    \u0394OI     IV   Signal\n{sep}\n"
-        )
-        for row in pe_rows:
-            pe_block += row + "\n"
-        pe_block += "</code>"
-        pe_block += (
-            f"Wall: <b>{pe_wall:,}</b>  TotalPE: <b>{round(tot_pe/100_000,1)}L</b>\n"
-            f"\U0001f7e2 Support at <b>{pe_adding:,}</b>"
-        )
-        if pe_exit_v < -30_000:
-            pe_block += f"  \U0001f534 Unwinding at <b>{pe_exiting:,}</b>"
-
-        footer = (
-            "\n\n<b>\U0001f4cc Bias</b>\n"
-            f"PCR {pcr} \u2192 {pcr_verdict(pcr)}\n"
-            f"Range: <b>{pe_wall:,}</b> (support) \u2192 <b>{ce_wall:,}</b> (resistance)"
-        )
-
-        return header + ce_block + pe_block + footer
-
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return f"⚠️ {index_name} OI parse error: {e}"
+    footer = (
+        "\n\n<b>\U0001f4cc Bias</b>\n"
+        f"PCR {pcr} \u2192 {pcr_verdict(pcr)}\n"
+        f"Range: <b>{pe_wall:,}</b> (supp) \u2192 <b>{ce_wall:,}</b> (res)"
+    )
+    return header + ce_block + pe_block + footer
 
 
 def check_oi_alert(name):
